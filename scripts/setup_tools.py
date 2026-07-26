@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -14,6 +15,8 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+
+import certifi
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +38,15 @@ FFMPEG_SHA256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2e
 FFMPEG_EXE_SHA256 = "1326dde4c84ff1f96fe6b8916c5bed29e163e9b5dccf995f6f3db069d143ec5e"
 
 
+def download_ssl_context() -> ssl.SSLContext:
+    """Use certifi so Python's trust store works consistently on macOS."""
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def download(url: str, destination: Path) -> None:
     print(f"Downloading {url}")
-    with urllib.request.urlopen(url) as response, destination.open("wb") as output:
+    context = download_ssl_context()
+    with urllib.request.urlopen(url, context=context) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
 
 
