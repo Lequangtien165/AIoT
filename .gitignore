@@ -7,3 +7,6 @@ __pycache__/
 *.py[cod]
 database/*.index
 database/metadata.json
+AGENTS.md
+.ignore
+outputs/
