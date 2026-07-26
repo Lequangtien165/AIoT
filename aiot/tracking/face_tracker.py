@@ -45,7 +45,7 @@ class TrackEvent:
 
 
 class FaceTracker:
-    """Gan ID theo IoU; cache nhan theo ID thay vi theo toa do bounding box."""
+    """Assign IDs by IoU and cache labels by ID rather than bounding box coordinates."""
 
     def __init__(
         self,

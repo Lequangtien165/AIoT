@@ -9,7 +9,7 @@ import cv2
 
 
 def display_source(source: str) -> str:
-    """Tra ve URL an toan de hien thi trong log."""
+    """Return a URL that is safe to display in logs."""
     try:
         parsed = urlsplit(source)
         if not parsed.hostname:
@@ -27,6 +27,6 @@ def display_source(source: str) -> str:
 
 
 def open_capture(source: str) -> cv2.VideoCapture:
-    """Mo RTSP qua TCP de khop cau hinh MediaMTX local."""
+    """Open RTSP over TCP to match the local MediaMTX configuration."""
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
     return cv2.VideoCapture(source, cv2.CAP_FFMPEG)

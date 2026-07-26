@@ -22,16 +22,16 @@ class Detection:
 
 
 class FaceDetector:
-    """Phat hien tat ca khuon mat trong BGR frame bang MediaPipe."""
+    """Detect all faces in a BGR frame with MediaPipe."""
 
     def __init__(self, confidence: float = 0.5) -> None:
         if not MODEL_PATH.is_file():
             raise FileNotFoundError(
-                f"Khong tim thay model MediaPipe: {MODEL_PATH}. "
-                "Hay tai theo huong dan trong README.md."
+                f"MediaPipe model was not found: {MODEL_PATH}. "
+                "Download it using the instructions in README.md."
             )
         if not 0 <= confidence <= 1:
-            raise ValueError("Confidence phai nam trong khoang 0 den 1.")
+            raise ValueError("Confidence must be between 0 and 1.")
 
         options = vision.FaceDetectorOptions(
             base_options=python.BaseOptions(model_asset_path=str(MODEL_PATH)),

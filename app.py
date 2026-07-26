@@ -1,4 +1,4 @@
-"""Hien thi RTSP voi bounding box MediaPipe."""
+"""Display an RTSP stream with MediaPipe bounding boxes."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ WINDOW_TITLE = "MediaPipe Face Detection"
 
 
 def draw_detections(frame, detections) -> None:
-    """Ve box cho moi khuon mat da duoc detect."""
+    """Draw a box for every detected face."""
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -84,7 +84,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except (FileNotFoundError, ValueError) as error:
-        print(f"Loi: {error}", file=sys.stderr)
+        print(f"Error: {error}", file=sys.stderr)
         return 1
     finally:
         if camera is not None:

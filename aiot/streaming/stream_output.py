@@ -38,7 +38,7 @@ class StreamOutput:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = self.snapshot_dir / f"{timestamp}_track-{track_id}_{safe_name(label)}_{score:.3f}.jpg"
         if not cv2.imwrite(str(path), frame):
-            print("[CANH BAO] Khong the luu snapshot.")
+            print("[WARNING] Could not save snapshot.")
             return None
         return path
 
@@ -65,6 +65,6 @@ class StreamOutput:
                 return writer
             writer.release()
         if not self.warning_shown:
-            print("[CANH BAO] Khong mo duoc VideoWriter; tiep tuc chay khong ghi video.")
+            print("[WARNING] Could not open VideoWriter; continuing without video recording.")
             self.warning_shown = True
         return None

@@ -1,4 +1,4 @@
-"""Nhan dien tat ca khuon mat tu RTSP tren Windows."""
+"""Recognize all faces from an RTSP stream on Windows."""
 
 from __future__ import annotations
 
@@ -13,32 +13,32 @@ from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
 
 
-WINDOW_TITLE = "Nhan dien khuon mat"
+WINDOW_TITLE = "Face Recognition"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Nhan dien khuon mat realtime tu RTSP tren Windows.")
-    parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL (mac dinh: {RTSP_URL}).")
-    parser.add_argument("--confidence", type=float, default=0.5, help="MediaPipe confidence (mac dinh: 0.5).")
-    parser.add_argument("--threshold", type=float, default=0.45, help="Nguong cosine similarity (mac dinh: 0.45).")
-    parser.add_argument("--top-k", type=int, default=5, help="So vector FAISS can tim (mac dinh: 5).")
+    parser = argparse.ArgumentParser(description="Recognize faces from an RTSP stream on Windows.")
+    parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL (default: {RTSP_URL}).")
+    parser.add_argument("--confidence", type=float, default=0.5, help="MediaPipe confidence (default: 0.5).")
+    parser.add_argument("--threshold", type=float, default=0.45, help="Cosine similarity threshold (default: 0.45).")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of FAISS vectors to retrieve (default: 5).")
     parser.add_argument("--recognition-interval-frames", type=int, default=15)
     parser.add_argument("--max-recognitions-per-frame", type=int, default=1)
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
     parser.add_argument("--track-ttl-frames", type=int, default=20)
     parser.add_argument("--min-track-age-frames", type=int, default=3)
     parser.add_argument("--min-face-size", type=int, default=80)
-    parser.add_argument("--record-video", help="File hoac thu muc ghi video annotated.")
-    parser.add_argument("--snapshot-dir", help="Thu muc luu anh khi MATCH hoac doi identity.")
-    parser.add_argument("--no-mirror", action="store_true", help="Khong lat ngang preview.")
+    parser.add_argument("--record-video", help="File or directory for annotated video output.")
+    parser.add_argument("--snapshot-dir", help="Directory for snapshots on MATCH or identity change.")
+    parser.add_argument("--no-mirror", action="store_true", help="Do not mirror the preview.")
     parser.add_argument("--reconnect-delay", type=float, default=2.0)
     args = parser.parse_args()
     if not 0 <= args.confidence <= 1 or not 0 <= args.threshold <= 1:
-        parser.error("confidence va threshold phai nam trong khoang 0 den 1.")
+        parser.error("confidence and threshold must be between 0 and 1.")
     if args.top_k <= 0 or args.recognition_interval_frames <= 0 or args.max_recognitions_per_frame <= 0:
-        parser.error("Cac gia tri interval, top-k va max recognitions phai lon hon 0.")
+        parser.error("interval, top-k, and max recognitions must be greater than 0.")
     if args.reconnect_delay <= 0 or args.track_ttl_frames <= 0 or args.min_track_age_frames <= 0:
-        parser.error("Cac gia tri reconnect va track phai lon hon 0.")
+        parser.error("reconnect and track values must be greater than 0.")
     return args
 
 
@@ -77,7 +77,7 @@ def log_event(event, snapshot_path) -> None:
 def main() -> int:
     args = parse_args()
     if platform.system() != "Windows":
-        print("Nhan dien InsightFace + FAISS hien chi duoc ho tro tren Windows. Hay dung python app.py de detect.", file=sys.stderr)
+        print("InsightFace + FAISS recognition is currently supported only on Windows. Use python app.py for detection.", file=sys.stderr)
         return 1
 
     # Import only after the platform gate so macOS can keep a detection-only install.
@@ -111,7 +111,7 @@ def main() -> int:
                         camera.release()
                         camera = None
                         if not reconnecting:
-                            print(f"Khong mo duoc RTSP: {display_source(args.source)}. Dang thu lai...", file=sys.stderr)
+                            print(f"Could not open RTSP stream: {display_source(args.source)}. Retrying...", file=sys.stderr)
                         reconnecting = True
                         if cv2.waitKey(int(args.reconnect_delay * 1000)) & 0xFF in (27, ord("q")):
                             break
@@ -136,7 +136,7 @@ def main() -> int:
                     try:
                         observations = engine.extract_faces(frame)
                     except Exception as error:
-                        print(f"[CANH BAO] Khong the tao embedding: {error}", file=sys.stderr)
+                        print(f"[WARNING] Could not generate embeddings: {error}", file=sys.stderr)
                         observations = []
                     for track in selected:
                         observation = max(observations, key=lambda item: iou(track.bbox, item.bbox), default=None)

@@ -15,19 +15,19 @@ METADATA_PATH = Path("database/metadata.json")
 
 
 class FaceRecognizer:
-    """Tim nguoi gan nhat trong FAISS theo cosine similarity."""
+    """Find the nearest person in FAISS using cosine similarity."""
 
     def __init__(self) -> None:
         if not INDEX_PATH.exists() or not METADATA_PATH.exists():
-            raise FileNotFoundError("Khong tim thay database. Hay chay python build_index.py truoc.")
+            raise FileNotFoundError("Recognition database was not found. Run python build_index.py first.")
         self.index = faiss.read_index(str(INDEX_PATH))
         with METADATA_PATH.open(encoding="utf-8") as file:
             self.metadata: list[dict[str, str | int]] = json.load(file)
         if self.index.ntotal != len(self.metadata):
-            raise ValueError("So vector trong index khong khop metadata.")
+            raise ValueError("The number of vectors in the index does not match the metadata.")
 
     def search(self, embeddings: np.ndarray, top_k: int = 5) -> list[tuple[str, float]]:
-        """Tra ve nguoi co score cao nhat cho tung embedding dau vao."""
+        """Return the highest-scoring person for each input embedding."""
         if embeddings.ndim == 1:
             embeddings = embeddings.reshape(1, -1)
         if embeddings.shape[0] == 0:

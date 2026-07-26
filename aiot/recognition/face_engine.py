@@ -1,4 +1,4 @@
-# Thực hiện lấy ảnh -> InsightFace detect -> lấy embedding -> chuẩn hóa embedding
+# Read an image, detect faces with InsightFace, generate embeddings, and normalize them.
 
 
 
@@ -12,14 +12,14 @@ from insightface.app import FaceAnalysis
 
 @dataclass(frozen=True)
 class FaceEmbedding:
-    """Embedding da chuan hoa va bounding box cua mot khuon mat."""
+    """A normalized embedding and bounding box for one face."""
 
     bbox: tuple[int, int, int, int]
     embedding: np.ndarray
 
 
 class FaceEngine:
-    """Phát hiện khuôn mặt và tạo embedding bằng InsightFace."""
+    """Detect faces and generate embeddings with InsightFace."""
 
     def __init__(self) -> None:
         self.app = FaceAnalysis(
@@ -27,8 +27,8 @@ class FaceEngine:
             providers=["CPUExecutionProvider"],
         )
 
-        # ctx_id=-1: chạy bằng CPU.
-        # det_size là kích thước ảnh đầu vào cho detector.
+        # ctx_id=-1 runs inference on the CPU.
+        # det_size is the detector input resolution.
         self.app.prepare(
             ctx_id=-1,
             det_size=(640, 640),
@@ -40,47 +40,46 @@ class FaceEngine:
         require_single_face: bool = True,
     ) -> np.ndarray:
         """
-        Đọc ảnh, phát hiện khuôn mặt và trả về embedding đã chuẩn hóa.
+        Read an image, detect faces, and return a normalized embedding.
 
         Returns:
-            np.ndarray có shape (512,), dtype float32.
+            A float32 array with shape `(512,)`.
         """
         image_path = Path(image_path)
 
         if not image_path.exists():
             raise FileNotFoundError(
-                f"Không tìm thấy ảnh: {image_path}"
+                f"Image was not found: {image_path}"
             )
 
         image = cv2.imread(str(image_path))
 
         if image is None:
             raise ValueError(
-                f"Không thể đọc ảnh: {image_path}"
+                f"Could not read image: {image_path}"
             )
 
         faces = self.extract_faces(image)
 
         if len(faces) == 0:
             raise ValueError(
-                f"Không tìm thấy khuôn mặt trong ảnh: {image_path}"
+                f"No face was found in image: {image_path}"
             )
 
         if require_single_face and len(faces) != 1:
             raise ValueError(
-                f"Ảnh {image_path} có {len(faces)} khuôn mặt. "
-                "Ảnh enrollment phải chỉ có một khuôn mặt."
+                f"Image {image_path} contains {len(faces)} faces. "
+                "An enrollment image must contain exactly one face."
             )
 
-        # Nếu ảnh có nhiều mặt và không bắt buộc single face,
-        # chọn khuôn mặt có bounding box lớn nhất.
+        # When multiple faces are allowed, select the largest bounding box.
         face = max(faces, key=lambda item: self._face_area(item.bbox))
         return face.embedding
 
     def extract_faces(self, image: np.ndarray) -> list[FaceEmbedding]:
-        """Tra ve tat ca khuon mat trong BGR frame cung embedding normalized."""
+        """Return all faces in a BGR frame with normalized embeddings."""
         if image is None or image.size == 0:
-            raise ValueError("Frame anh rong.")
+            raise ValueError("Image frame is empty.")
 
         faces: list[FaceEmbedding] = []
         for face in self.app.get(image):
