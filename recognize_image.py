@@ -1,5 +1,4 @@
-# Từ ảnh test -> InsightFace tạo embedding query -> FAISS tìm top-k vector gần nhất 
-# -> Gom kết quả theo từng người, và so sánh nó với threshold để kiếm ra người giống nhất (Chỉ số gần nhau nhất)
+# Generate a query embedding, search FAISS, group hits by person, and apply the threshold.
 
 
 
@@ -13,14 +12,19 @@ import cv2
 import faiss
 import numpy as np
 
-from face_engine import FaceEngine
+from aiot.recognition.face_engine import FaceEngine
+
+
+# Prevent non-ASCII output from failing on legacy Windows code pages.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 INDEX_PATH = Path("database/faces.index")
 METADATA_PATH = Path("database/metadata.json")
 
-# Đây là giá trị khởi đầu để demo.
-# Cần hiệu chỉnh bằng dữ liệu thật của bạn.
+# This is a demo starting point.
+# Calibrate it with real data.
 DEFAULT_THRESHOLD = 0.45
 
 
@@ -30,13 +34,13 @@ def load_database() -> tuple[
 ]:
     if not INDEX_PATH.exists():
         raise FileNotFoundError(
-            "Không tìm thấy FAISS index. "
-            "Hãy chạy python build_index.py trước."
+            "FAISS index was not found. "
+            "Run python build_index.py first."
         )
 
     if not METADATA_PATH.exists():
         raise FileNotFoundError(
-            "Không tìm thấy metadata.json."
+            "metadata.json was not found."
         )
 
     index = faiss.read_index(
@@ -51,7 +55,7 @@ def load_database() -> tuple[
 
     if index.ntotal != len(metadata):
         raise ValueError(
-            "Số vector trong index không khớp metadata."
+            "The number of vectors in the index does not match the metadata."
         )
 
     return index, metadata
@@ -87,11 +91,11 @@ def recognize(
         k,
     )
 
-    # Một người có thể có nhiều ảnh enrollment.
-    # Ta giữ score cao nhất của từng người.
+    # A person can have multiple enrollment images.
+    # Keep that person's highest score.
     best_by_person: dict[str, dict] = {}
 
-    print("\nCác vector gần nhất:")
+    print("\nNearest vectors:")
 
     for rank, (vector_id, similarity) in enumerate(
         zip(indices[0], similarities[0]),
@@ -125,7 +129,7 @@ def recognize(
             }
 
     if not best_by_person:
-        print("Không tìm thấy kết quả.")
+        print("No results found.")
         return
 
     ranked_people = sorted(
@@ -137,7 +141,7 @@ def recognize(
     best_name, best_result = ranked_people[0]
     best_similarity = best_result["similarity"]
 
-    print("\nKết quả theo người:")
+    print("\nResults by person:")
 
     for name, result in ranked_people:
         print(
@@ -145,7 +149,7 @@ def recognize(
             f"{result['similarity']:.4f}"
         )
 
-    print("\nKẾT LUẬN")
+    print("\nRESULT")
 
     if best_similarity >= threshold:
         print(f"MATCH: {best_name}")
@@ -156,7 +160,7 @@ def recognize(
     else:
         print("UNKNOWN")
         print(
-            f"Người gần nhất: {best_name}"
+            f"Nearest person: {best_name}"
         )
         print(
             f"Cosine similarity: "
@@ -170,15 +174,14 @@ def recognize(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Nhận diện khuôn mặt bằng "
-            "InsightFace + FAISS."
+            "Recognize faces with InsightFace + FAISS."
         )
     )
 
     parser.add_argument(
         "image",
         type=Path,
-        help="Đường dẫn ảnh cần nhận diện.",
+        help="Path to the image to recognize.",
     )
 
     parser.add_argument(
@@ -186,8 +189,8 @@ def main() -> None:
         type=float,
         default=DEFAULT_THRESHOLD,
         help=(
-            "Ngưỡng cosine similarity. "
-            f"Mặc định: {DEFAULT_THRESHOLD}"
+            "Cosine similarity threshold. "
+            f"Default: {DEFAULT_THRESHOLD}"
         ),
     )
 
@@ -195,24 +198,24 @@ def main() -> None:
         "--top-k",
         type=int,
         default=5,
-        help="Số vector gần nhất cần lấy.",
+        help="Number of nearest vectors to retrieve.",
     )
 
     args = parser.parse_args()
 
     if not args.image.exists():
         raise FileNotFoundError(
-            f"Không tìm thấy ảnh: {args.image}"
+            f"Image was not found: {args.image}"
         )
 
     if not 0.0 <= args.threshold <= 1.0:
         raise ValueError(
-            "Threshold phải nằm trong khoảng 0 đến 1."
+            "Threshold must be between 0 and 1."
         )
 
     if args.top_k <= 0:
         raise ValueError(
-            "top-k phải lớn hơn 0."
+            "top-k must be greater than 0."
         )
 
     recognize(
@@ -226,5 +229,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"\nLỗi: {error}")
+        print(f"\nError: {error}")
         sys.exit(1)

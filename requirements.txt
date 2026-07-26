@@ -1,5 +1,5 @@
-insightface
-onnxruntime
-opencv-python
-faiss-cpu
-numpy
+# Detection and RTSP preview: Windows AMD64 and macOS ARM64.
+numpy==2.5.1
+mediapipe==0.10.35
+opencv-contrib-python==5.0.0.93
+certifi

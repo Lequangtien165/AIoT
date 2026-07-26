@@ -1,0 +1,17 @@
+# Local-only RTSP relay for the webcam publisher.
+logLevel: info
+logDestinations: [stdout]
+
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+moq: false
+
+paths:
+  camera:
+    source: publisher
