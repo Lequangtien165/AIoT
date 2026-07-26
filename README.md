@@ -92,7 +92,7 @@ On macOS use the AVFoundation video index shown by `--list-devices`:
 python stream_server.py --device 0
 ```
 
-Optional capture settings:
+The default capture mode is `1280x720` at `30 FPS`, avoiding AVFoundation's unsupported `29.97 FPS` fallback. Override it only when a camera does not support that mode:
 
 ```bash
 python stream_server.py \

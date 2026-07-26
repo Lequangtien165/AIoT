@@ -32,8 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--list-devices", action="store_true", help="List available video devices and exit."
     )
-    parser.add_argument("--framerate", type=int, help="Requested camera frame rate.")
-    parser.add_argument("--video-size", help="Requested size, for example 1280x720.")
+    parser.add_argument(
+        "--framerate", type=int, default=30, help="Requested camera frame rate (default: 30)."
+    )
+    parser.add_argument(
+        "--video-size", default="1280x720", help="Requested size (default: 1280x720)."
+    )
     parser.add_argument("--bitrate", default="2M", help="H.264 bitrate (default: 2M).")
     args = parser.parse_args()
 

@@ -10,11 +10,19 @@ from stream_server import (
     build_ffmpeg_command,
     choose_device,
     get_video_devices,
+    parse_args,
     parse_macos_devices,
 )
 
 
 class FfmpegCommandTests(unittest.TestCase):
+    @patch("sys.argv", ["stream_server.py", "--device", "Camera A"])
+    def test_default_capture_mode_is_720p_at_30_fps(self):
+        args = parse_args()
+
+        self.assertEqual(args.video_size, "1280x720")
+        self.assertEqual(args.framerate, 30)
+
     def test_command_preserves_capture_rate_without_frame_duplication(self):
         args = argparse.Namespace(
             device="Rapoo camera", framerate=25, video_size="1280x720", bitrate="2M"
