@@ -16,6 +16,11 @@ import numpy as np
 from face_engine import FaceEngine
 
 
+# Giup thong diep tieng Viet khong loi khi stdout dang dung code page Windows cu.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 INDEX_PATH = Path("database/faces.index")
 METADATA_PATH = Path("database/metadata.json")
 

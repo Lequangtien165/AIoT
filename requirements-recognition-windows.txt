@@ -1,0 +1,10 @@
+# Install after requirements.txt on Windows AMD64 and Python 3.14.
+-r requirements.txt
+
+onnxruntime==1.28.0
+faiss-cpu==1.14.3
+onnx
+scipy
+scikit-image
+tqdm
+requests

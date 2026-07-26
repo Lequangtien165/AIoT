@@ -2,11 +2,20 @@
 
 
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
+
+
+@dataclass(frozen=True)
+class FaceEmbedding:
+    """Embedding da chuan hoa va bounding box cua mot khuon mat."""
+
+    bbox: tuple[int, int, int, int]
+    embedding: np.ndarray
 
 
 class FaceEngine:
@@ -50,7 +59,7 @@ class FaceEngine:
                 f"Không thể đọc ảnh: {image_path}"
             )
 
-        faces = self.app.get(image)
+        faces = self.extract_faces(image)
 
         if len(faces) == 0:
             raise ValueError(
@@ -65,30 +74,29 @@ class FaceEngine:
 
         # Nếu ảnh có nhiều mặt và không bắt buộc single face,
         # chọn khuôn mặt có bounding box lớn nhất.
-        face = max(
-            faces,
-            key=lambda item: self._face_area(item.bbox),
-        )
+        face = max(faces, key=lambda item: self._face_area(item.bbox))
+        return face.embedding
 
-        embedding = np.asarray(
-            face.embedding,
-            dtype="float32",
-        )
+    def extract_faces(self, image: np.ndarray) -> list[FaceEmbedding]:
+        """Tra ve tat ca khuon mat trong BGR frame cung embedding normalized."""
+        if image is None or image.size == 0:
+            raise ValueError("Frame anh rong.")
 
-        if embedding.ndim != 1:
-            embedding = embedding.flatten()
+        faces: list[FaceEmbedding] = []
+        for face in self.app.get(image):
+            embedding = np.asarray(face.embedding, dtype="float32").flatten()
+            norm = np.linalg.norm(embedding)
+            if norm == 0:
+                continue
 
-        # Chuẩn hóa vector về độ dài 1 để dùng cosine similarity.
-        norm = np.linalg.norm(embedding)
-
-        if norm == 0:
-            raise ValueError(
-                f"Embedding bằng vector 0: {image_path}"
+            x1, y1, x2, y2 = (int(value) for value in face.bbox)
+            faces.append(
+                FaceEmbedding(
+                    bbox=(x1, y1, x2, y2),
+                    embedding=(embedding / norm).astype("float32"),
+                )
             )
-
-        embedding = embedding / norm
-
-        return embedding.astype("float32")
+        return faces
 
     @staticmethod
     def _face_area(bbox: np.ndarray) -> float:

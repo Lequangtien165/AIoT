@@ -1,10 +1,11 @@
-# MediaPipe Face Detection over RTSP
+# AIoT Face Detection and Recognition
 
-This project supports Windows AMD64 and macOS Apple Silicon. It contains two independent modules:
+This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS.
 
 ```text
 Module 1: Webcam -> FFmpeg -> MediaMTX -> rtsp://127.0.0.1:8554/camera
 Module 2: RTSP -> OpenCV + MediaPipe -> local window with green face boxes
+Module 3: RTSP -> MediaPipe + InsightFace + FAISS -> named face boxes (Windows only)
 ```
 
 The publisher does not analyze, mirror, resize, or annotate the webcam image. The detector does not republish its annotated video.
@@ -16,6 +17,8 @@ The publisher does not analyze, mirror, resize, or annotate the webcam image. Th
 - Internet access once to download MediaMTX
 
 ## Setup
+
+Use a dedicated Python 3.14 virtual environment. The stream dependencies are cross-platform:
 
 ### Windows
 
@@ -55,6 +58,22 @@ On either platform, reinstall verified project-local tools with:
 
 ```bash
 python scripts/setup_tools.py --force
+```
+
+### Windows Recognition Setup
+
+Install the Windows-only recognition backend after the common dependencies. Install InsightFace without its dependencies so it cannot install `opencv-python` alongside `opencv-contrib-python`.
+
+```bash
+python -m pip install -r requirements-recognition-windows.txt
+python -m pip install --no-deps insightface==1.0.1
+```
+
+Build the enrollment index before recognition. Enrollment images belong in `dataset/<person>/` and must have one face each.
+
+```bash
+python build_index.py
+python recognize_image.py path/to/image.jpg
 ```
 
 Download the official MediaPipe short-range BlazeFace model:
@@ -137,6 +156,28 @@ When the publisher is stopped or the stream temporarily fails, the detector keep
 --confidence VALUE    Detection confidence from 0 to 1, default: 0.5
 --reconnect-delay S   Seconds between RTSP retries, default: 2
 ```
+
+## Realtime Recognition (Windows Only)
+
+After starting the RTSP publisher and building the index, open a second terminal:
+
+```bash
+python recognize_stream.py
+```
+
+The window labels every tracked face with a cached identity. MediaPipe detects every frame; InsightFace + FAISS runs periodically, so the UI remains responsive on CPU. Press `Q`, `Esc`, or `Ctrl+C` to stop.
+
+```bash
+python recognize_stream.py \
+  --threshold 0.45 \
+  --recognition-interval-frames 15 \
+  --record-video outputs/session.mp4 \
+  --snapshot-dir outputs/snapshots
+```
+
+Video recording is optional. A snapshot is saved only when a track first becomes `MATCH` or its confirmed identity changes. `outputs/` is ignored by Git.
+
+On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a clear Windows-only message.
 
 ## Troubleshooting
 
