@@ -8,7 +8,7 @@ import sys
 import faiss
 import numpy as np
 
-from face_engine import FaceEngine
+from aiot.recognition.face_engine import FaceEngine
 
 
 # Giup thong diep tieng Viet khong loi khi stdout dang dung code page Windows cu.

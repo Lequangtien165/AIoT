@@ -22,7 +22,7 @@ import certifi
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from stream_platform import get_platform_config, mediamtx_download_spec
+from aiot.streaming.stream_platform import get_platform_config, mediamtx_download_spec
 
 TOOLS_DIR = PROJECT_ROOT / "tools"
 

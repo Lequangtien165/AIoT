@@ -12,7 +12,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 
-MODEL_PATH = Path(__file__).parent / "models" / "blaze_face_short_range.tflite"
+MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "blaze_face_short_range.tflite"
 
 
 @dataclass(frozen=True)

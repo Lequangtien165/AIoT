@@ -1,6 +1,6 @@
 import unittest
 
-from stream_platform import get_platform_config, mediamtx_download_spec
+from aiot.streaming.stream_platform import get_platform_config, mediamtx_download_spec
 
 
 class PlatformConfigTests(unittest.TestCase):

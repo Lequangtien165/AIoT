@@ -11,8 +11,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from stream_platform import PlatformConfig, get_platform_config
-from stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
+from aiot.streaming.stream_platform import PlatformConfig, get_platform_config
+from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
 
 PROJECT_ROOT = Path(__file__).parent
 MEDIA_MTX_CONFIG = PROJECT_ROOT / "config" / "mediamtx.yml"

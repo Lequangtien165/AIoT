@@ -3,7 +3,7 @@ import subprocess
 from unittest.mock import patch
 import unittest
 
-from stream_platform import get_platform_config
+from aiot.streaming.stream_platform import get_platform_config
 from stream_server import (
     CameraDevice,
     RTSP_URL,

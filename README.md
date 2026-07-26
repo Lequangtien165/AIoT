@@ -10,6 +10,18 @@ Module 3: RTSP -> MediaPipe + InsightFace + FAISS -> named face boxes (Windows o
 
 The publisher does not analyze, mirror, resize, or annotate the webcam image. The detector does not republish its annotated video.
 
+## Layout
+
+Keep executable commands at the repository root. Reusable code is grouped under `aiot/`:
+
+```text
+aiot/
+  detection/    MediaPipe face detection
+  recognition/  InsightFace embeddings and FAISS search
+  streaming/    RTSP reader, output, publisher configuration
+  tracking/     IoU tracks and identity cache
+```
+
 ## Requirements
 
 - A supported platform with an available webcam: Windows AMD64 or macOS Apple Silicon

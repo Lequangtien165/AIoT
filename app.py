@@ -8,9 +8,9 @@ import time
 
 import cv2
 
-from face_detector import FaceDetector
-from stream_reader import display_source, open_capture
-from stream_settings import RTSP_URL
+from aiot.detection.face_detector import FaceDetector
+from aiot.streaming.stream_reader import display_source, open_capture
+from aiot.streaming.stream_settings import RTSP_URL
 
 
 WINDOW_TITLE = "MediaPipe Face Detection"

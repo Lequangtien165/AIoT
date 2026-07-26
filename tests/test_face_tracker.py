@@ -1,6 +1,6 @@
 import unittest
 
-from face_tracker import FaceTracker, iou
+from aiot.tracking.face_tracker import FaceTracker, iou
 
 
 class FaceTrackerTests(unittest.TestCase):

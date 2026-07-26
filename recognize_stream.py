@@ -9,8 +9,8 @@ import time
 
 import cv2
 
-from stream_reader import display_source, open_capture
-from stream_settings import RTSP_URL
+from aiot.streaming.stream_reader import display_source, open_capture
+from aiot.streaming.stream_settings import RTSP_URL
 
 
 WINDOW_TITLE = "Nhan dien khuon mat"
@@ -81,11 +81,11 @@ def main() -> int:
         return 1
 
     # Import only after the platform gate so macOS can keep a detection-only install.
-    from face_detector import FaceDetector
-    from face_engine import FaceEngine
-    from face_recognizer import FaceRecognizer
-    from face_tracker import FaceTracker, iou
-    from stream_output import StreamOutput
+    from aiot.detection.face_detector import FaceDetector
+    from aiot.recognition.face_engine import FaceEngine
+    from aiot.recognition.face_recognizer import FaceRecognizer
+    from aiot.streaming.stream_output import StreamOutput
+    from aiot.tracking.face_tracker import FaceTracker, iou
 
     engine = FaceEngine()
     recognizer = FaceRecognizer()

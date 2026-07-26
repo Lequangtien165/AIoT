@@ -1,6 +1,6 @@
 import unittest
 
-from stream_output import safe_name
+from aiot.streaming.stream_output import safe_name
 
 
 class SafeNameTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from stream_settings import RTSP_HOST, RTSP_PATH, RTSP_PORT, RTSP_URL
+from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PATH, RTSP_PORT, RTSP_URL
 
 
 class StreamSettingsTests(unittest.TestCase):
