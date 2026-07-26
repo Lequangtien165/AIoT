@@ -1,5 +1,6 @@
 insightface
 onnxruntime
-opencv-python
 faiss-cpu
 numpy
+mediapipe==0.10.35
+opencv-contrib-python

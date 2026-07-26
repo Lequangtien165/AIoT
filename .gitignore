@@ -1,6 +1,7 @@
 *.jpg
 *.jpeg
 /test_images/test_tien.jpg
+.venv/
 __pycache__/
 *.py[cod]
 database/*.index
