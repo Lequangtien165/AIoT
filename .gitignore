@@ -1,0 +1,7 @@
+*.jpg
+*.jpeg
+/test_images/test_tien.jpg
+__pycache__/
+*.py[cod]
+database/*.index
+database/metadata.json
