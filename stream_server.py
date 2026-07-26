@@ -81,7 +81,7 @@ def parse_macos_devices(output: str) -> list[CameraDevice]:
     return devices
 
 
-def get_video_devices(config: PlatformConfig) -> tuple[list[CameraDevice], int]:
+def get_video_devices(config: PlatformConfig) -> tuple[list[CameraDevice], int, str]:
     command = [str(config.ffmpeg_path), "-hide_banner", "-f", config.capture_format]
     if config.name == "windows":
         command.extend(["-list_devices", "true", "-i", "dummy"])
@@ -94,21 +94,29 @@ def get_video_devices(config: PlatformConfig) -> tuple[list[CameraDevice], int]:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    # FFmpeg normally exits non-zero after listing capture devices.
-    if result.returncode not in (0, 1):
-        return [], result.returncode
-
+    output = result.stdout or ""
     devices = (
-        parse_windows_devices(result.stdout)
+        parse_windows_devices(output)
         if config.name == "windows"
-        else parse_macos_devices(result.stdout)
+        else parse_macos_devices(output)
     )
-    return devices, 0
+    # FFmpeg can return a platform-specific non-zero status after successfully
+    # listing capture devices. Parsed devices are the authoritative result.
+    if devices:
+        return devices, 0, output
+    return [], result.returncode or 1, output
+
+
+def print_device_query_diagnostic(output: str) -> None:
+    if output.strip():
+        print("FFmpeg device query output:", file=sys.stderr)
+        print(output.rstrip(), file=sys.stderr)
 
 
 def list_devices(config: PlatformConfig) -> int:
-    devices, status = get_video_devices(config)
+    devices, status, output = get_video_devices(config)
     if status:
+        print_device_query_diagnostic(output)
         return status
     if not devices:
         print("No video devices found.", file=sys.stderr)
@@ -229,9 +237,10 @@ def main() -> int:
     if args.list_devices:
         return list_devices(config)
     if not args.device:
-        devices, status = get_video_devices(config)
+        devices, status, output = get_video_devices(config)
         if status:
-            print("Could not query DirectShow video devices.", file=sys.stderr)
+            print("Could not query video devices.", file=sys.stderr)
+            print_device_query_diagnostic(output)
             return status
         if not devices:
             print("No video devices found.", file=sys.stderr)

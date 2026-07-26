@@ -1,9 +1,17 @@
 import argparse
+import subprocess
 from unittest.mock import patch
 import unittest
 
 from stream_platform import get_platform_config
-from stream_server import CameraDevice, RTSP_URL, build_ffmpeg_command, choose_device, parse_macos_devices
+from stream_server import (
+    CameraDevice,
+    RTSP_URL,
+    build_ffmpeg_command,
+    choose_device,
+    get_video_devices,
+    parse_macos_devices,
+)
 
 
 class FfmpegCommandTests(unittest.TestCase):
@@ -73,6 +81,21 @@ AVFoundation audio devices:
         self.assertIn("-bf", command)
         self.assertNotIn("dshow", command)
         self.assertNotIn("libx264", command)
+
+    @patch("stream_server.subprocess.run")
+    def test_macos_device_list_succeeds_when_ffmpeg_returns_nonzero_after_listing(
+        self, run
+    ):
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=187,
+            stdout="AVFoundation video devices:\n[0] FaceTime HD Camera\n",
+        )
+
+        devices, status, _ = get_video_devices(get_platform_config("Darwin", "arm64"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(devices, [CameraDevice("FaceTime HD Camera", "0")])
 
 
 if __name__ == "__main__":
