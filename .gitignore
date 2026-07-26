@@ -2,6 +2,7 @@
 *.jpeg
 /test_images/test_tien.jpg
 .venv/
+tools/
 __pycache__/
 *.py[cod]
 database/*.index
