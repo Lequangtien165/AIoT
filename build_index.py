@@ -1,4 +1,4 @@
-# Duyệt dataset -> tạo embedding cho từng ảnh -> đưa embedding vào FAISS -> lưu index vào metadata
+# Read enrollment images, generate embeddings, and write the FAISS index with metadata.
 
 
 from pathlib import Path
@@ -8,7 +8,12 @@ import sys
 import faiss
 import numpy as np
 
-from face_engine import FaceEngine
+from aiot.recognition.face_engine import FaceEngine
+
+
+# Prevent non-ASCII output from failing on legacy Windows code pages.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 DATASET_DIR = Path("dataset")
@@ -27,7 +32,7 @@ VALID_EXTENSIONS = {
 
 def collect_images() -> list[tuple[str, Path]]:
     """
-    Trả về danh sách:
+    Return entries in this form:
     [
         ("tien", Path("dataset/tien/tien_01.jpg")),
         ...
@@ -37,7 +42,7 @@ def collect_images() -> list[tuple[str, Path]]:
 
     if not DATASET_DIR.exists():
         raise FileNotFoundError(
-            f"Không tìm thấy thư mục dataset: "
+            f"Dataset directory was not found: "
             f"{DATASET_DIR.resolve()}"
         )
 
@@ -61,7 +66,7 @@ def main() -> None:
 
     if not samples:
         raise RuntimeError(
-            "Dataset không có ảnh hợp lệ."
+            "The dataset contains no valid images."
         )
 
     engine = FaceEngine()
@@ -69,11 +74,11 @@ def main() -> None:
     embeddings: list[np.ndarray] = []
     metadata: list[dict[str, str | int]] = []
 
-    print(f"Tìm thấy {len(samples)} ảnh.")
+    print(f"Found {len(samples)} images.")
     print("-" * 60)
 
     for person_name, image_path in samples:
-        print(f"Đang xử lý: {image_path}")
+        print(f"Processing: {image_path}")
 
         try:
             embedding = engine.extract_embedding(
@@ -81,7 +86,7 @@ def main() -> None:
                 require_single_face=True,
             )
         except Exception as error:
-            print(f"  Bỏ qua: {error}")
+            print(f"  Skipped: {error}")
             continue
 
         vector_id = len(embeddings)
@@ -103,7 +108,7 @@ def main() -> None:
 
     if not embeddings:
         raise RuntimeError(
-            "Không tạo được embedding nào."
+            "No embeddings were created."
         )
 
     embedding_matrix = np.vstack(
@@ -112,11 +117,11 @@ def main() -> None:
 
     dimension = embedding_matrix.shape[1]
 
-    # Kiểm tra lại normalization trước khi đưa vào FAISS.
+    # Verify normalization before adding vectors to FAISS.
     faiss.normalize_L2(embedding_matrix)
 
-    # IndexFlatIP = exact inner-product search.
-    # Với vector normalized, score chính là cosine similarity.
+    # IndexFlatIP performs exact inner-product search.
+    # With normalized vectors, the score is cosine similarity.
     index = faiss.IndexFlatIP(dimension)
 
     index.add(embedding_matrix)
@@ -148,10 +153,10 @@ def main() -> None:
     }
 
     print("\n" + "=" * 60)
-    print("BUILD INDEX THÀNH CÔNG")
-    print(f"Số người: {len(people)}")
-    print(f"Số embedding: {index.ntotal}")
-    print(f"Số chiều: {dimension}")
+    print("INDEX BUILD SUCCEEDED")
+    print(f"People: {len(people)}")
+    print(f"Embeddings: {index.ntotal}")
+    print(f"Dimensions: {dimension}")
     print(f"FAISS index: {INDEX_PATH.resolve()}")
     print(f"Metadata: {METADATA_PATH.resolve()}")
 
@@ -160,5 +165,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"\nLỗi: {error}")
+        print(f"\nError: {error}")
         sys.exit(1)
