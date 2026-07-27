@@ -1,11 +1,38 @@
 import hashlib
+import io
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.setup_tools import certifi, download_ssl_context, safe_extract, ssl, verify_checksum
+from aiot.streaming.stream_platform import PlatformConfig
+from scripts.setup_tools import (
+    certifi,
+    download,
+    download_ssl_context,
+    install_archive,
+    main,
+    safe_extract,
+    ssl,
+    verify_checksum,
+)
+
+
+class FakeResponse:
+    def __init__(self, content: bytes, content_length: str | None = None):
+        self.content = io.BytesIO(content)
+        self.headers = {} if content_length is None else {"Content-Length": content_length}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, size: int) -> bytes:
+        return self.content.read(size)
 
 
 class ChecksumTests(unittest.TestCase):
@@ -43,6 +70,103 @@ class ChecksumTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as zip_file:
                 with self.assertRaises(RuntimeError):
                     safe_extract(zip_file, root / "extract")
+
+
+class DownloadTests(unittest.TestCase):
+    @patch("scripts.setup_tools.urllib.request.urlopen")
+    def test_download_writes_content_and_reports_non_tty_milestones(self, urlopen):
+        content = b"a" * (2 * 1024 * 1024)
+        urlopen.return_value = FakeResponse(content, str(len(content)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "tool.zip"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                download("https://example.com/tool.zip", destination)
+
+            self.assertEqual(destination.read_bytes(), content)
+
+        self.assertIn("  50%", output.getvalue())
+        self.assertIn("100%", output.getvalue())
+
+    @patch("scripts.setup_tools.urllib.request.urlopen")
+    def test_download_handles_missing_content_length(self, urlopen):
+        urlopen.return_value = FakeResponse(b"archive")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "tool.zip"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                download("https://example.com/tool.zip", destination)
+
+            self.assertEqual(destination.read_bytes(), b"archive")
+
+        self.assertIn("Downloaded 7 B", output.getvalue())
+
+    @patch("scripts.setup_tools.urllib.request.urlopen")
+    def test_download_handles_invalid_content_length(self, urlopen):
+        urlopen.return_value = FakeResponse(b"archive", "unknown")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "tool.zip"
+            with redirect_stdout(io.StringIO()):
+                download("https://example.com/tool.zip", destination)
+
+            self.assertEqual(destination.read_bytes(), b"archive")
+
+
+class InstallArchiveTests(unittest.TestCase):
+    def test_existing_verified_archive_is_reported_without_download(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "mediamtx"
+            destination.mkdir()
+            executable = destination / "mediamtx"
+            executable.write_bytes(b"installed")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                install_archive(
+                    "[1/1]",
+                    "MediaMTX v1.19.3",
+                    "https://example.com/mediamtx.tar.gz",
+                    "unused",
+                    destination,
+                    "mediamtx",
+                    None,
+                    False,
+                    "tar.gz",
+                )
+
+        self.assertIn("[1/1] MediaMTX v1.19.3", output.getvalue())
+        self.assertIn("Already installed from a verified archive", output.getvalue())
+
+
+class SetupOrderingTests(unittest.TestCase):
+    @patch("scripts.setup_tools.install_archive")
+    @patch("scripts.setup_tools.verify_macos_ffmpeg")
+    @patch("scripts.setup_tools.mediamtx_download_spec", return_value=("darwin_arm64.tar.gz", "tar.gz", "a" * 64))
+    @patch("scripts.setup_tools.get_platform_config")
+    @patch("scripts.setup_tools.parse_args")
+    def test_macos_verifies_ffmpeg_before_installing_mediamtx(
+        self, parse_args, get_config, download_spec, verify_ffmpeg, install_archive
+    ):
+        parse_args.return_value = type("Args", (), {"force": False})()
+        get_config.return_value = PlatformConfig(
+            name="macos-arm64",
+            capture_format="avfoundation",
+            video_encoder="h264_videotoolbox",
+            ffmpeg_path=Path("/opt/homebrew/bin/ffmpeg"),
+            mediamtx_path=Path("tools/mediamtx/mediamtx"),
+        )
+        order = []
+        verify_ffmpeg.side_effect = lambda _: order.append("ffmpeg")
+        install_archive.side_effect = lambda *_: order.append("mediamtx")
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(), 0)
+
+        self.assertEqual(order, ["ffmpeg", "mediamtx"])
+        install_archive.assert_called_once()
 
 
 if __name__ == "__main__":
