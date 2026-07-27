@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -36,6 +37,7 @@ FFMPEG_URL = (
 )
 FFMPEG_SHA256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
 FFMPEG_EXE_SHA256 = "1326dde4c84ff1f96fe6b8916c5bed29e163e9b5dccf995f6f3db069d143ec5e"
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def download_ssl_context() -> ssl.SSLContext:
@@ -43,11 +45,65 @@ def download_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
+def format_size(size: float) -> str:
+    """Format a byte count for concise terminal status messages."""
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{size:.0f} {unit}"
+        size /= 1024
+    raise AssertionError("unreachable")
+
+
 def download(url: str, destination: Path) -> None:
-    print(f"Downloading {url}")
+    """Download a file while providing useful progress in terminals and logs."""
     context = download_ssl_context()
     with urllib.request.urlopen(url, context=context) as response, destination.open("wb") as output:
-        shutil.copyfileobj(response, output)
+        content_length = response.headers.get("Content-Length")
+        try:
+            total = int(content_length) if content_length else None
+        except ValueError:
+            total = None
+
+        downloaded = 0
+        last_reported_percent = -1
+        last_reported_bytes = 0
+        started = time.monotonic()
+        interactive = sys.stdout.isatty()
+
+        while chunk := response.read(DOWNLOAD_CHUNK_SIZE):
+            output.write(chunk)
+            downloaded += len(chunk)
+            elapsed = max(time.monotonic() - started, 0.001)
+            speed = downloaded / elapsed
+
+            if total:
+                percent = min(int(downloaded * 100 / total), 100)
+                if interactive:
+                    filled = percent // 5
+                    bar = "=" * filled + " " * (20 - filled)
+                    eta = max(total - downloaded, 0) / speed
+                    message = (
+                        f"\r  [{bar}] {percent:3d}% {format_size(downloaded)}/"
+                        f"{format_size(total)} {format_size(speed)}/s ETA {eta:.0f}s"
+                    )
+                    print(message, end="", flush=True)
+                elif percent >= last_reported_percent + 10 or percent == 100:
+                    print(f"  {percent:3d}% {format_size(downloaded)}/{format_size(total)}")
+                    last_reported_percent = percent
+            elif interactive:
+                print(
+                    f"\r  {format_size(downloaded)} downloaded {format_size(speed)}/s",
+                    end="",
+                    flush=True,
+                )
+            elif downloaded >= last_reported_bytes + 10 * 1024 * 1024:
+                print(f"  {format_size(downloaded)} downloaded")
+                last_reported_bytes = downloaded
+
+        if interactive:
+            print()
+        elif not total or last_reported_percent != 100:
+            print(f"  Downloaded {format_size(downloaded)}")
 
 
 def verify_checksum(path: Path, expected: str) -> None:
@@ -76,6 +132,8 @@ def safe_extract_tar(tar_file: tarfile.TarFile, destination: Path) -> None:
 
 
 def install_archive(
+    stage: str,
+    tool_name: str,
     url: str,
     checksum: str,
     destination: Path,
@@ -84,29 +142,33 @@ def install_archive(
     force: bool,
     archive_type: str,
 ) -> None:
+    print(f"{stage} {tool_name}")
     executable_path = (
         destination / "bin" / executable if executable == "ffmpeg.exe" else destination / executable
     )
     if executable_path.is_file() and not force:
+        print("  Checking existing installation...")
         if executable_checksum:
             try:
                 verify_checksum(executable_path, executable_checksum)
             except RuntimeError:
-                print(f"{destination.name} is present but failed verification; reinstalling.")
+                print("  Existing installation failed verification; reinstalling.")
             else:
-                print(f"{destination.name} is already installed and verified.")
+                print(f"  Already installed and verified: {executable_path}")
                 return
         else:
-            print(f"{destination.name} is already installed from a verified archive.")
+            print(f"  Already installed from a verified archive: {executable_path}")
             return
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         archive = temp_path / f"download.{archive_type}"
         extracted = temp_path / "extracted"
+        print("  Downloading...")
         download(url, archive)
+        print("  Verifying archive checksum...")
         verify_checksum(archive, checksum)
-        print("Checksum verified.")
+        print("  Extracting archive...")
 
         if archive_type == "zip":
             with zipfile.ZipFile(archive) as zip_file:
@@ -119,6 +181,7 @@ def install_archive(
         if source is None:
             raise RuntimeError(f"Archive does not contain {executable}.")
 
+        print(f"  Installing to {destination.relative_to(PROJECT_ROOT)}...")
         destination.mkdir(parents=True, exist_ok=True)
         if executable == "ffmpeg.exe":
             source_root = source.parent.parent
@@ -133,8 +196,9 @@ def install_archive(
         if os.name != "nt":
             executable_path.chmod(executable_path.stat().st_mode | stat.S_IXUSR)
         if executable_checksum:
+            print("  Verifying installation...")
             verify_checksum(executable_path, executable_checksum)
-        print("Installation verified." if executable_checksum else "Archive verified and installed.")
+        print(f"  Installed successfully: {executable_path}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,6 +208,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def verify_macos_ffmpeg(ffmpeg_path: Path) -> None:
+    print("[1/2] Homebrew FFmpeg")
+    print("  Checking AVFoundation and h264_videotoolbox support...")
     if not ffmpeg_path.is_file():
         raise RuntimeError("FFmpeg is missing. Install it with: brew install ffmpeg")
 
@@ -175,7 +241,21 @@ def main() -> int:
             "https://github.com/bluenviron/mediamtx/releases/download/"
             f"v{MEDIA_MTX_VERSION}/mediamtx_v{MEDIA_MTX_VERSION}_{media_asset}"
         )
+        platform_name = "Windows AMD64" if config.name == "windows" else "macOS Apple Silicon"
+        print(f"Platform: {platform_name}")
+        print("Install plan:")
+        if config.name == "windows":
+            print(f"  [1/2] MediaMTX v{MEDIA_MTX_VERSION} -> {TOOLS_DIR / 'mediamtx'}")
+            print(f"  [2/2] FFmpeg v{FFMPEG_VERSION} -> {TOOLS_DIR / 'ffmpeg'}")
+        else:
+            print(f"  [1/2] Verify Homebrew FFmpeg -> {config.ffmpeg_path}")
+            print(f"  [2/2] MediaMTX v{MEDIA_MTX_VERSION} -> {TOOLS_DIR / 'mediamtx'}")
+
+        if config.name != "windows":
+            verify_macos_ffmpeg(config.ffmpeg_path)
         install_archive(
+            "[1/2]" if config.name == "windows" else "[2/2]",
+            f"MediaMTX v{MEDIA_MTX_VERSION}",
             media_url,
             media_checksum,
             TOOLS_DIR / "mediamtx",
@@ -186,6 +266,8 @@ def main() -> int:
         )
         if config.name == "windows":
             install_archive(
+                "[2/2]",
+                f"FFmpeg v{FFMPEG_VERSION}",
                 FFMPEG_URL,
                 FFMPEG_SHA256,
                 TOOLS_DIR / "ffmpeg",
@@ -194,8 +276,6 @@ def main() -> int:
                 args.force,
                 "zip",
             )
-        else:
-            verify_macos_ffmpeg(config.ffmpeg_path)
     except (OSError, RuntimeError, urllib.error.URLError, tarfile.TarError, zipfile.BadZipFile) as error:
         print(f"Tool setup failed: {error}", file=sys.stderr)
         return 1

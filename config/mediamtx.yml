@@ -3,7 +3,7 @@ logLevel: info
 logDestinations: [stdout]
 
 rtsp: true
-rtspAddress: 127.0.0.1:8554
+rtspAddress: 0.0.0.0:8554
 rtspTransports: [tcp]
 
 rtmp: false

@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 python scripts/setup_tools.py
 ```
 
-`setup_tools.py` downloads pinned FFmpeg and MediaMTX archives, verifies their checksums, and verifies the installed executables in `tools/`. It does not modify the system `PATH`.
+`setup_tools.py` shows an install plan and staged download, checksum, extraction, and verification status for pinned FFmpeg and MediaMTX archives. Interactive terminals show a progress bar; redirected output reports download milestones. It verifies the installed executables in `tools/` and does not modify the system `PATH`.
 
 ### macOS Apple Silicon
 
@@ -64,7 +64,7 @@ python -m pip install -r requirements.txt
 python scripts/setup_tools.py
 ```
 
-On macOS, FFmpeg is managed by Homebrew at `/opt/homebrew/bin/ffmpeg`; the setup script verifies its AVFoundation input and `h264_videotoolbox` encoder. MediaMTX remains project-local in `tools/`.
+On macOS, FFmpeg is managed by Homebrew at `/opt/homebrew/bin/ffmpeg`; the setup script verifies its AVFoundation input and `h264_videotoolbox` encoder before downloading MediaMTX. MediaMTX remains project-local in `tools/`.
 
 On either platform, reinstall verified project-local tools with:
 
