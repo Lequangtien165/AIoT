@@ -101,6 +101,8 @@ def main() -> int:
     frame_number = 0
     reconnecting = False
     source_fps = 0.0
+    provider_display = ", ".join(engine.providers)
+    print(f"FaceEngine providers: {provider_display}", file=sys.stderr)
 
     try:
         with FaceDetector(args.confidence) as detector:
@@ -133,15 +135,30 @@ def main() -> int:
                 selected = tracker.select_for_recognition(frame_number, args.max_recognitions_per_frame)
                 events = []
                 if selected:
-                    try:
-                        observations = engine.extract_faces(frame)
-                    except Exception as error:
-                        print(f"[WARNING] Could not generate embeddings: {error}", file=sys.stderr)
-                        observations = []
+                    fallback_observations = None
                     for track in selected:
-                        observation = max(observations, key=lambda item: iou(track.bbox, item.bbox), default=None)
-                        if observation is None or iou(track.bbox, observation.bbox) < 0.10:
-                            event = tracker.apply_recognition(track.track_id, None, None, args.threshold)
+                        try:
+                            observation = engine.extract_face_from_bbox(frame, track.bbox)
+                        except Exception as error:
+                            print(f"[WARNING] Could not generate embedding for track {track.track_id}: {error}", file=sys.stderr)
+                            observation = None
+                        if observation is None:
+                            if fallback_observations is None:
+                                try:
+                                    fallback_observations = engine.extract_faces(frame)
+                                except Exception as error:
+                                    print(f"[WARNING] Could not generate fallback embeddings: {error}", file=sys.stderr)
+                                    fallback_observations = []
+                            observation = max(
+                                fallback_observations,
+                                key=lambda item: iou(track.bbox, item.bbox),
+                                default=None,
+                            )
+                            if observation is None or iou(track.bbox, observation.bbox) < 0.10:
+                                event = tracker.apply_recognition(track.track_id, None, None, args.threshold)
+                            else:
+                                name, score = recognizer.search(observation.embedding, args.top_k)[0]
+                                event = tracker.apply_recognition(track.track_id, name, score, args.threshold)
                         else:
                             name, score = recognizer.search(observation.embedding, args.top_k)[0]
                             event = tracker.apply_recognition(track.track_id, name, score, args.threshold)

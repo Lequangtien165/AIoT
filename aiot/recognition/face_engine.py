@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 from insightface.app import FaceAnalysis
 
 
@@ -22,15 +23,28 @@ class FaceEngine:
     """Detect faces and generate embeddings with InsightFace."""
 
     def __init__(self) -> None:
+        available_providers = ort.get_available_providers()
+        preferred_providers = [
+            provider
+            for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+            if provider in available_providers
+        ]
+        if not preferred_providers:
+            raise RuntimeError(
+                "No supported ONNX Runtime providers were found. "
+                f"Available providers: {available_providers}"
+            )
+
         self.app = FaceAnalysis(
             name="buffalo_l",
-            providers=["CPUExecutionProvider"],
+            providers=preferred_providers,
         )
+        self.providers = preferred_providers
 
         # ctx_id=-1 runs inference on the CPU.
         # det_size is the detector input resolution.
         self.app.prepare(
-            ctx_id=-1,
+            ctx_id=0 if "CUDAExecutionProvider" in preferred_providers else -1,
             det_size=(640, 640),
         )
 
@@ -96,6 +110,50 @@ class FaceEngine:
                 )
             )
         return faces
+
+    def extract_face_from_bbox(
+        self,
+        image: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        margin: float = 0.20,
+    ) -> FaceEmbedding | None:
+        """Generate an embedding for the face nearest to the supplied bounding box."""
+        if image is None or image.size == 0:
+            raise ValueError("Image frame is empty.")
+
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = bbox
+        box_width = max(1, x2 - x1)
+        box_height = max(1, y2 - y1)
+        pad_x = int(box_width * margin)
+        pad_y = int(box_height * margin)
+        crop_x1 = max(0, x1 - pad_x)
+        crop_y1 = max(0, y1 - pad_y)
+        crop_x2 = min(width, x2 + pad_x)
+        crop_y2 = min(height, y2 + pad_y)
+
+        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+            return None
+
+        crop = image[crop_y1:crop_y2, crop_x1:crop_x2]
+        faces = self.extract_faces(crop)
+        if not faces:
+            return None
+
+        target_center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+        def distance_to_target(face: FaceEmbedding) -> float:
+            fx1, fy1, fx2, fy2 = face.bbox
+            center_x = crop_x1 + (fx1 + fx2) / 2.0
+            center_y = crop_y1 + (fy1 + fy2) / 2.0
+            return float((center_x - target_center[0]) ** 2 + (center_y - target_center[1]) ** 2)
+
+        match = min(faces, key=distance_to_target)
+        fx1, fy1, fx2, fy2 = match.bbox
+        return FaceEmbedding(
+            bbox=(crop_x1 + fx1, crop_y1 + fy1, crop_x1 + fx2, crop_y1 + fy2),
+            embedding=match.embedding,
+        )
 
     @staticmethod
     def _face_area(bbox: np.ndarray) -> float:
