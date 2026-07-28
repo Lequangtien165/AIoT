@@ -1,11 +1,11 @@
 # AIoT Face Detection and Recognition
 
-This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS.
+This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS, with NVIDIA CUDA used when the local ONNX Runtime GPU dependencies are available.
 
 ```text
 Module 1: Webcam -> FFmpeg -> MediaMTX -> rtsp://127.0.0.1:8554/camera
 Module 2: RTSP -> OpenCV + MediaPipe -> local window with green face boxes
-Module 3: RTSP -> MediaPipe + InsightFace + FAISS -> named face boxes (Windows only)
+Module 3: RTSP -> InsightFace + FAISS -> named face boxes (Windows only)
 ```
 
 The publisher does not analyze, mirror, resize, or annotate the webcam image. The detector does not republish its annotated video.
@@ -34,11 +34,11 @@ Use a dedicated Python 3.14 virtual environment. The stream dependencies are cro
 
 ### Windows
 
-From Bash in this project directory:
+From PowerShell in this project directory:
 
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python scripts/setup_tools.py
@@ -76,14 +76,24 @@ python scripts/setup_tools.py --force
 
 Install the Windows-only recognition backend after the common dependencies. Install InsightFace without its dependencies so it cannot install `opencv-python` alongside `opencv-contrib-python`.
 
-```bash
+```powershell
 python -m pip install -r requirements-recognition-windows.txt
 python -m pip install --no-deps insightface==1.0.1
 ```
 
+`onnxruntime-gpu==1.28.0` requires an NVIDIA driver that supports CUDA 13 and compatible CUDA/cuDNN runtime DLLs. On the tested Windows RTX 3050 Laptop setup, updating the NVIDIA driver to a CUDA 13-capable release made `CUDAExecutionProvider` active. If those dependencies are missing or the driver is too old, the app falls back to CPU and prints a warning that includes the failing ONNX Runtime provider load message. Use `--require-gpu` to fail fast instead of silently running on CPU.
+
+Verify that ONNX Runtime can bind the InsightFace detector to CUDA:
+
+```powershell
+python -c "import onnxruntime as ort; ort.preload_dlls(directory=''); print('available', ort.get_available_providers()); s=ort.InferenceSession(r'C:\Users\Qtienle\.insightface\models\buffalo_l\det_10g.onnx', providers=['CUDAExecutionProvider','CPUExecutionProvider']); print('active', s.get_providers())"
+```
+
+The expected result includes `CUDAExecutionProvider` in `active`. If `active` is only `CPUExecutionProvider`, run recognition with `--require-gpu` to confirm the failure before tuning performance.
+
 Build the enrollment index before recognition. Enrollment images belong in `dataset/<person>/` and must have one face each.
 
-```bash
+```powershell
 python build_index.py
 python recognize_image.py path/to/image.jpg
 ```
@@ -113,9 +123,11 @@ python stream_server.py
 
 For scripts or automation, provide the device explicitly. On Windows use the exact DirectShow device name:
 
-```bash
+```powershell
 python stream_server.py --device "Integrated Camera"
 ```
+
+Do not include the menu number from `--list-devices`. For example, use `"Integrated Camera"`, not `"1. Integrated Camera"`.
 
 On macOS use the AVFoundation video index shown by `--list-devices`:
 
@@ -133,13 +145,13 @@ python stream_server.py \
   --bitrate 2M
 ```
 
-The raw webcam stream is available only on this machine:
+The raw webcam stream is published at:
 
 ```text
 rtsp://127.0.0.1:8554/camera
 ```
 
-MediaMTX is bound to `127.0.0.1`, so it does not accept LAN clients and no firewall rule is required. Press `Ctrl+C` to stop FFmpeg, MediaMTX, and release the webcam. On macOS, the publisher uses the M1 hardware encoder (`h264_videotoolbox`).
+MediaMTX listens on the configured RTSP address in `config/mediamtx.yml`. Press `Ctrl+C` to stop FFmpeg, MediaMTX, and release the webcam. On macOS, the publisher uses the M1 hardware encoder (`h264_videotoolbox`).
 
 On the first macOS capture attempt, grant camera access to the terminal application in **System Settings > Privacy & Security > Camera**.
 
@@ -173,21 +185,50 @@ When the publisher is stopped or the stream temporarily fails, the detector keep
 
 After starting the RTSP publisher and building the index, open a second terminal:
 
-```bash
-python recognize_stream.py
+```powershell
+cd A:\face_reg
+.\venv\Scripts\Activate.ps1
+python recognize_stream.py --recognition-fps 2 --profile --require-gpu
 ```
 
-The window labels every tracked face with a cached identity. MediaPipe detects every frame; InsightFace + FAISS runs periodically, so the UI remains responsive on CPU. Press `Q`, `Esc`, or `Ctrl+C` to stop.
+The startup log should include:
 
-```bash
+```text
+FaceEngine providers: CUDAExecutionProvider, CPUExecutionProvider
+GPU active
+```
+
+The window labels every tracked face with a cached identity. The display loop stays responsive because frame capture, InsightFace inference, and rendering run as separate stages. Press `Q`, `Esc`, or `Ctrl+C` to stop. If `--recognition-fps 2` is stable, increase it gradually:
+
+```powershell
 python recognize_stream.py \
   --threshold 0.45 \
-  --recognition-interval-frames 15 \
+  --recognition-fps 4 \
+  --profile \
+  --require-gpu
+```
+
+Then try `--recognition-fps 6` if the GPU latency remains low. Use `--require-gpu` when the session must use CUDA and should exit immediately if ONNX Runtime falls back to CPU.
+
+Watch GPU usage from a third terminal:
+
+```powershell
+nvidia-smi -l 1
+```
+
+The process list should show `python.exe`, and GPU memory or utilization should increase while recognition is running.
+
+Video recording is optional. A snapshot is saved only when a track first becomes `MATCH` or its confirmed identity changes. `outputs/` is ignored by Git.
+
+```powershell
+python recognize_stream.py \
+  --threshold 0.45 \
+  --recognition-fps 6 \
+  --profile \
+  --require-gpu \
   --record-video outputs/session.mp4 \
   --snapshot-dir outputs/snapshots
 ```
-
-Video recording is optional. A snapshot is saved only when a track first becomes `MATCH` or its confirmed identity changes. `outputs/` is ignored by Git.
 
 On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a clear Windows-only message.
 
@@ -197,4 +238,6 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 - `FFmpeg stopped unexpectedly`: use the exact camera name from `--list-devices`; close other apps using the webcam.
 - `MediaMTX did not start`: port `8554` is likely already in use.
 - `Could not open RTSP stream`: start module 1 first, then verify `rtsp://127.0.0.1:8554/camera`.
+- `Could not find video device with name [1. Integrated Camera]`: pass the exact device name without the menu number, for example `--device "Integrated Camera"`.
+- `GPU requested but unavailable, using CPU`: verify the NVIDIA driver, CUDA/cuDNN runtime DLLs, and the ONNX Runtime CUDA session test in the Windows recognition setup section.
 - For RTSP URLs containing credentials, avoid placing the full command in shared shell history or screenshots. Application logs redact passwords.
