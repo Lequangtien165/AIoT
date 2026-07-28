@@ -1,7 +1,8 @@
 # Install after requirements.txt on Windows AMD64 and Python 3.14.
+# Realtime GPU recognition requires onnxruntime-gpu plus compatible NVIDIA CUDA runtime DLLs.
 -r requirements.txt
 
-onnxruntime==1.28.0
+onnxruntime-gpu==1.28.0
 faiss-cpu==1.14.3
 onnx
 scipy

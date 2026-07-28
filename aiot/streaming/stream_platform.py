@@ -32,12 +32,20 @@ def get_platform_config(
     machine = (machine or platform.machine()).lower()
 
     if system == "Windows" and machine in {"amd64", "x86_64"}:
+        ffmpeg_path = Path(
+            shutil.which("ffmpeg")
+            or PROJECT_ROOT / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+        )
+        mediamtx_path = Path(
+            shutil.which("mediamtx")
+            or PROJECT_ROOT / "tools" / "mediamtx" / "mediamtx.exe"
+        )
         return PlatformConfig(
             name="windows",
             capture_format="dshow",
             video_encoder="libx264",
-            ffmpeg_path=PROJECT_ROOT / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
-            mediamtx_path=PROJECT_ROOT / "tools" / "mediamtx" / "mediamtx.exe",
+            ffmpeg_path=ffmpeg_path,
+            mediamtx_path=mediamtx_path,
         )
 
     if system == "Darwin" and machine in {"arm64", "aarch64"}:
