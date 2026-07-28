@@ -1,12 +1,14 @@
 # Read an image, detect faces with InsightFace, generate embeddings, and normalize them.
 
-
-
 from dataclasses import dataclass
 from pathlib import Path
+import io
+from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 from insightface.app import FaceAnalysis
 
 
@@ -18,20 +20,65 @@ class FaceEmbedding:
     embedding: np.ndarray
 
 
+@dataclass(frozen=True)
+class ProviderStatus:
+    requested: list[str]
+    effective: list[str]
+    warning: str | None
+    gpu_requested: bool
+    gpu_active: bool
+
+
 class FaceEngine:
     """Detect faces and generate embeddings with InsightFace."""
 
-    def __init__(self) -> None:
-        self.app = FaceAnalysis(
-            name="buffalo_l",
-            providers=["CPUExecutionProvider"],
-        )
+    def __init__(self, det_size: int = 640) -> None:
+        if det_size <= 0:
+            raise ValueError("Detection size must be greater than 0.")
 
-        # ctx_id=-1 runs inference on the CPU.
-        # det_size is the detector input resolution.
-        self.app.prepare(
-            ctx_id=-1,
-            det_size=(640, 640),
+        if hasattr(ort, "preload_dlls"):
+            ort.preload_dlls()
+
+        available_providers = ort.get_available_providers()
+        preferred_providers = [
+            provider
+            for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+            if provider in available_providers
+        ]
+        if not preferred_providers:
+            raise RuntimeError(
+                "No supported ONNX Runtime providers were found. "
+                f"Available providers: {available_providers}"
+            )
+
+        captured_stdout = io.StringIO()
+        captured_stderr = io.StringIO()
+        with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
+            self.app = FaceAnalysis(
+                name="buffalo_l",
+                providers=preferred_providers,
+            )
+
+            # ctx_id=-1 runs inference on the CPU.
+            # det_size is the detector input resolution.
+            self.app.prepare(
+                ctx_id=0 if "CUDAExecutionProvider" in preferred_providers else -1,
+                det_size=(det_size, det_size),
+            )
+
+        self.startup_output = "\n".join(
+            text.rstrip()
+            for text in (captured_stdout.getvalue(), captured_stderr.getvalue())
+            if text.strip()
+        )
+        self.requested_providers = preferred_providers
+        self.providers = self._effective_providers()
+        self.provider_status = ProviderStatus(
+            requested=list(self.requested_providers),
+            effective=list(self.providers),
+            warning=self._build_provider_warning(),
+            gpu_requested="CUDAExecutionProvider" in self.requested_providers,
+            gpu_active="CUDAExecutionProvider" in self.providers,
         )
 
     def extract_embedding(
@@ -97,7 +144,75 @@ class FaceEngine:
             )
         return faces
 
+    def extract_face_from_bbox(
+        self,
+        image: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        margin: float = 0.20,
+    ) -> FaceEmbedding | None:
+        """Generate an embedding for the face nearest to the supplied bounding box."""
+        if image is None or image.size == 0:
+            raise ValueError("Image frame is empty.")
+
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = bbox
+        box_width = max(1, x2 - x1)
+        box_height = max(1, y2 - y1)
+        pad_x = int(box_width * margin)
+        pad_y = int(box_height * margin)
+        crop_x1 = max(0, x1 - pad_x)
+        crop_y1 = max(0, y1 - pad_y)
+        crop_x2 = min(width, x2 + pad_x)
+        crop_y2 = min(height, y2 + pad_y)
+
+        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+            return None
+
+        crop = image[crop_y1:crop_y2, crop_x1:crop_x2]
+        faces = self.extract_faces(crop)
+        if not faces:
+            return None
+
+        target_center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+        def distance_to_target(face: FaceEmbedding) -> float:
+            fx1, fy1, fx2, fy2 = face.bbox
+            center_x = crop_x1 + (fx1 + fx2) / 2.0
+            center_y = crop_y1 + (fy1 + fy2) / 2.0
+            return float((center_x - target_center[0]) ** 2 + (center_y - target_center[1]) ** 2)
+
+        match = min(faces, key=distance_to_target)
+        fx1, fy1, fx2, fy2 = match.bbox
+        return FaceEmbedding(
+            bbox=(crop_x1 + fx1, crop_y1 + fy1, crop_x1 + fx2, crop_y1 + fy2),
+            embedding=match.embedding,
+        )
+
     @staticmethod
     def _face_area(bbox: np.ndarray) -> float:
         x1, y1, x2, y2 = bbox
         return float((x2 - x1) * (y2 - y1))
+
+    def _effective_providers(self) -> list[str]:
+        for model in self.app.models.values():
+            session = getattr(model, "session", None)
+            if session is not None and hasattr(session, "get_providers"):
+                return list(session.get_providers())
+        return list(self.requested_providers)
+
+    def _build_provider_warning(self) -> str | None:
+        gpu_requested = "CUDAExecutionProvider" in self.requested_providers
+        gpu_active = "CUDAExecutionProvider" in self.providers
+        if not gpu_requested:
+            return None
+        if gpu_active:
+            return None
+        if self.startup_output:
+            return (
+                "CUDAExecutionProvider was requested but InsightFace is running on CPU. "
+                f"ONNX Runtime output: {self.startup_output}"
+            )
+        return (
+            "CUDAExecutionProvider was requested but InsightFace is running on CPU. "
+            "Check CUDA, cuBLAS, and cuDNN runtime DLL availability."
+        )
