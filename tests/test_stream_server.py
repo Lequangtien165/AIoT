@@ -138,6 +138,13 @@ AVFoundation audio devices:
             [CameraDevice("FaceTime HD Camera", "0"), CameraDevice("OBS Virtual Camera", "1")],
         )
 
+    def test_avfoundation_parser_accepts_log_prefix_and_tab_separator(self):
+        output = "AVFoundation video devices:\n[AVFoundation indev @ 0x1] [2]\tExternal Camera  \n"
+
+        devices = parse_macos_devices(output)
+
+        self.assertEqual(devices, [CameraDevice("External Camera", "2")])
+
     def test_macos_uses_avfoundation_and_hardware_encoder(self):
         args = argparse.Namespace(device="0", framerate=30, video_size="1280x720", bitrate="2M")
 

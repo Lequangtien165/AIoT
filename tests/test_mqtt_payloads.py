@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from aiot.mqtt.audit_logger import AuditStore, is_audit_topic, parse_args
+from aiot.mqtt.audit_logger import AuditStore, is_audit_topic, parse_args, resolve_audit_db_path
 from aiot.mqtt import payloads
 from aiot.mqtt.topics import (
     AUDIT_TOPICS,
@@ -85,36 +85,38 @@ class AuditStoreTests(unittest.TestCase):
 
     def test_record_persists_audited_payloads_to_sqlite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "audit.sqlite3"
-            store = AuditStore(db_path)
-            try:
-                motion = payloads.motion_detected(
-                    device_id="pi4-edge",
-                    sensor_id="pir-1",
-                    active=True,
-                )
-                recognition = payloads.recognition_result(
-                    source="rtsp://127.0.0.1:8554/camera",
-                    frame_id=10,
-                    result_id=2,
-                    latency_ms=12.3,
-                    tracks=[],
-                    events=[],
-                )
-                error = payloads.error_event(
-                    component="recognition",
-                    message="pipeline failed",
-                )
-                store.record(TOPIC_MOTION_DETECTED, motion)
-                store.record(TOPIC_RECOGNITION_RESULT, recognition)
-                store.record(TOPIC_ERROR_PIPELINE, error)
+            database_dir = Path(temp_dir) / "database"
+            db_path = database_dir / "audit.sqlite3"
+            with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
+                store = AuditStore(db_path)
+                try:
+                    motion = payloads.motion_detected(
+                        device_id="pi4-edge",
+                        sensor_id="pir-1",
+                        active=True,
+                    )
+                    recognition = payloads.recognition_result(
+                        source="rtsp://127.0.0.1:8554/camera",
+                        frame_id=10,
+                        result_id=2,
+                        latency_ms=12.3,
+                        tracks=[],
+                        events=[],
+                    )
+                    error = payloads.error_event(
+                        component="recognition",
+                        message="pipeline failed",
+                    )
+                    store.record(TOPIC_MOTION_DETECTED, motion)
+                    store.record(TOPIC_RECOGNITION_RESULT, recognition)
+                    store.record(TOPIC_ERROR_PIPELINE, error)
 
-                rows = store._connection.execute(
-                    "SELECT topic, event_ts_ms, schema_version, payload_json "
-                    "FROM mqtt_audit_events ORDER BY id"
-                ).fetchall()
-            finally:
-                store.close()
+                    rows = store._connection.execute(
+                        "SELECT topic, event_ts_ms, schema_version, payload_json "
+                        "FROM mqtt_audit_events ORDER BY id"
+                    ).fetchall()
+                finally:
+                    store.close()
 
         self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0][0], TOPIC_MOTION_DETECTED)
@@ -125,6 +127,24 @@ class AuditStoreTests(unittest.TestCase):
         self.assertIn('"result_id": 2', rows[1][3])
         self.assertEqual(rows[2][0], TOPIC_ERROR_PIPELINE)
         self.assertIn('"message": "pipeline failed"', rows[2][3])
+
+    def test_audit_database_path_rejects_paths_outside_database_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_dir = Path(temp_dir) / "database"
+            with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
+                with self.assertRaises(ValueError):
+                    resolve_audit_db_path(Path(temp_dir) / "outside.sqlite3")
+                with self.assertRaises(ValueError):
+                    resolve_audit_db_path("file:audit.sqlite3")
+                with self.assertRaises(ValueError):
+                    resolve_audit_db_path(database_dir / "audit.db")
+
+    def test_audit_database_path_accepts_sqlite_file_below_database_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_dir = Path(temp_dir) / "database"
+            path = database_dir / "nested" / "audit.sqlite3"
+            with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
+                self.assertEqual(resolve_audit_db_path(path), path.resolve())
 
 
 if __name__ == "__main__":

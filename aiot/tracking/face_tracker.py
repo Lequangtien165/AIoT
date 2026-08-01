@@ -114,11 +114,14 @@ class FaceTracker:
             matched_tracks.add(track_id)
             matched_boxes.add(box_index)
 
-        for track_id, track in list(self.tracks.items()):
+        expired_track_ids: list[int] = []
+        for track_id, track in self.tracks.items():
             if track_id not in matched_tracks:
                 track.missed_frames += 1
                 if track.missed_frames > self.ttl_frames:
-                    del self.tracks[track_id]
+                    expired_track_ids.append(track_id)
+        for track_id in expired_track_ids:
+            del self.tracks[track_id]
 
         for box_index, box in enumerate(boxes):
             if box_index not in matched_boxes:
@@ -160,32 +163,52 @@ class FaceTracker:
         if track is None:
             return None
         matched_label = label if score is not None and score >= threshold else None
-        required = self.label_confirmations if matched_label else self.unknown_confirmations
-
-        if matched_label != track.candidate_label:
-            track.candidate_label = matched_label
-            track.candidate_count = 1
-        else:
-            track.candidate_count += 1
-        if track.candidate_count < required:
+        self._record_candidate(track, matched_label)
+        if track.candidate_count < self._required_confirmations(matched_label):
             return None
-
-        if matched_label and track.label and matched_label != track.label:
-            if score is None or track.score is not None and score < track.score + self.label_switch_margin:
-                return None
+        if not self._label_switch_allowed(track, matched_label, score):
+            return None
 
         previous_label = track.label
         previous_status = track.status
         track.label = matched_label
         track.score = score
         track.status = "matched" if matched_label else "unknown"
+        return self._transition_event(track_id, matched_label, previous_label, previous_status, score)
 
-        if previous_status != "matched" and matched_label:
-            return TrackEvent("identity_confirmed", track_id, matched_label, previous_label, score)
-        if previous_status == "matched" and not matched_label:
+    def _record_candidate(self, track: Track, label: str | None) -> None:
+        if label != track.candidate_label:
+            track.candidate_label = label
+            track.candidate_count = 1
+            return
+        track.candidate_count += 1
+
+    def _required_confirmations(self, label: str | None) -> int:
+        if label:
+            return self.label_confirmations
+        return self.unknown_confirmations
+
+    def _label_switch_allowed(self, track: Track, label: str | None, score: float | None) -> bool:
+        if not label or not track.label or label == track.label:
+            return True
+        if score is None:
+            return False
+        return track.score is None or score >= track.score + self.label_switch_margin
+
+    @staticmethod
+    def _transition_event(
+        track_id: int,
+        label: str | None,
+        previous_label: str | None,
+        previous_status: str,
+        score: float | None,
+    ) -> TrackEvent | None:
+        if previous_status != "matched" and label:
+            return TrackEvent("identity_confirmed", track_id, label, previous_label, score)
+        if previous_status == "matched" and not label:
             return TrackEvent("identity_lost", track_id, None, previous_label, score)
-        if previous_status == "matched" and matched_label != previous_label:
-            return TrackEvent("identity_changed", track_id, matched_label, previous_label, score)
+        if previous_status == "matched" and label != previous_label:
+            return TrackEvent("identity_changed", track_id, label, previous_label, score)
         return None
 
     def _match_score(self, first: BBox, second: BBox) -> float:
