@@ -34,6 +34,7 @@ class DisplayTrack:
     label: str | None
     score: float | None
     status: str
+    missed_frames: int
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,9 @@ class RecognitionResult:
     latency_ms: float
     tracks: list[DisplayTrack]
     events: list[object]
+    active_tracks: int
+    visible_tracks: int
+    stale_tracks: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,9 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=5, help="Number of FAISS vectors to retrieve (default: 5).")
     parser.add_argument("--recognition-fps", type=float, default=6.0)
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
-    parser.add_argument("--track-ttl-frames", type=int, default=20)
+    parser.add_argument("--track-ttl-frames", type=int, default=8)
     parser.add_argument("--min-track-age-frames", type=int, default=3)
     parser.add_argument("--min-face-size", type=int, default=80)
+    parser.add_argument("--matched-recognition-interval-frames", type=int, default=30)
     parser.add_argument("--det-size", type=int, default=640, help="InsightFace detector size (default: 640).")
     parser.add_argument("--record-video", help="File or directory for annotated video output.")
     parser.add_argument("--snapshot-dir", help="Directory for snapshots on MATCH or identity change.")
@@ -68,7 +73,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("threshold must be between 0 and 1.")
     if args.top_k <= 0 or args.recognition_fps <= 0 or args.det_size <= 0:
         parser.error("top-k, recognition-fps, and det-size must be greater than 0.")
-    if args.reconnect_delay <= 0 or args.track_ttl_frames <= 0 or args.min_track_age_frames <= 0:
+    if (
+        args.reconnect_delay <= 0
+        or args.track_ttl_frames <= 0
+        or args.min_track_age_frames <= 0
+        or args.matched_recognition_interval_frames <= 0
+    ):
         parser.error("reconnect and track values must be greater than 0.")
     return args
 
@@ -138,9 +148,17 @@ def snapshot_tracks(tracks: list[object]) -> list[DisplayTrack]:
             label=track.label,
             score=track.score,
             status=track.status,
+            missed_frames=track.missed_frames,
         )
         for track in tracks
+        if track.missed_frames == 0
     ]
+
+
+def track_counts(tracks: list[object], visible_tracks: list[DisplayTrack]) -> tuple[int, int, int]:
+    active_tracks = sum(1 for track in tracks if track.missed_frames == 0)
+    stale_tracks = sum(1 for track in tracks if track.missed_frames > 0)
+    return active_tracks, len(visible_tracks), stale_tracks
 
 
 class LatestFrameReader:
@@ -239,6 +257,9 @@ class RecognitionWorker:
         self._processed_frames = 0
         self._latency_total_ms = 0.0
         self._last_latency_ms = 0.0
+        self._active_tracks = 0
+        self._visible_tracks = 0
+        self._stale_tracks = 0
 
     def start(self) -> None:
         self._thread.start()
@@ -251,10 +272,17 @@ class RecognitionWorker:
         with self._lock:
             return self._latest_result
 
-    def stats(self) -> tuple[int, float, float]:
+    def stats(self) -> tuple[int, float, float, int, int, int]:
         with self._lock:
             average = self._latency_total_ms / self._processed_frames if self._processed_frames else 0.0
-            return self._processed_frames, self._last_latency_ms, average
+            return (
+                self._processed_frames,
+                self._last_latency_ms,
+                average,
+                self._active_tracks,
+                self._visible_tracks,
+                self._stale_tracks,
+            )
 
     def _run(self) -> None:
         last_frame_id = 0
@@ -302,9 +330,11 @@ class RecognitionWorker:
                     if event is not None:
                         events.append(event)
                 tracks_to_display = snapshot_tracks(tracks)
+                active_tracks, visible_tracks, stale_tracks = track_counts(tracks, tracks_to_display)
             except Exception as error:
                 print(f"[WARNING] Could not run InsightFace on frame {stream_frame.frame_id}: {error}", file=sys.stderr)
                 tracks_to_display = snapshot_tracks(list(self.tracker.tracks.values()))
+                active_tracks, visible_tracks, stale_tracks = track_counts(list(self.tracker.tracks.values()), tracks_to_display)
 
             latency_ms = (time.monotonic() - started) * 1000.0
             result_id += 1
@@ -315,12 +345,18 @@ class RecognitionWorker:
                 latency_ms=latency_ms,
                 tracks=tracks_to_display,
                 events=events,
+                active_tracks=active_tracks,
+                visible_tracks=visible_tracks,
+                stale_tracks=stale_tracks,
             )
             with self._lock:
                 self._latest_result = result
                 self._processed_frames += 1
                 self._latency_total_ms += latency_ms
                 self._last_latency_ms = latency_ms
+                self._active_tracks = active_tracks
+                self._visible_tracks = visible_tracks
+                self._stale_tracks = stale_tracks
 
 
 def print_profile(
@@ -335,7 +371,14 @@ def print_profile(
     now = time.monotonic()
     elapsed = max(0.001, now - last_profile_time)
     capture_frames = reader.frames_read()
-    recognition_frames, last_latency_ms, average_latency_ms = worker.stats()
+    (
+        recognition_frames,
+        last_latency_ms,
+        average_latency_ms,
+        active_tracks,
+        visible_tracks,
+        stale_tracks,
+    ) = worker.stats()
     capture_fps = (capture_frames - last_capture_frames) / elapsed
     recognition_fps = (recognition_frames - last_recognition_frames) / elapsed
     display_fps = (display_frames - last_display_frames) / elapsed
@@ -345,7 +388,10 @@ def print_profile(
         f"display_fps={display_fps:.1f} "
         f"recognition_fps={recognition_fps:.1f} "
         f"last_latency_ms={last_latency_ms:.1f} "
-        f"avg_latency_ms={average_latency_ms:.1f}",
+        f"avg_latency_ms={average_latency_ms:.1f} "
+        f"active_tracks={active_tracks} "
+        f"visible_tracks={visible_tracks} "
+        f"stale_tracks={stale_tracks}",
         file=sys.stderr,
     )
     return capture_frames, recognition_frames, display_frames, now
@@ -370,6 +416,7 @@ def main() -> int:
         min_age_frames=args.min_track_age_frames,
         min_face_size=args.min_face_size,
         recognition_interval_frames=1,
+        matched_recognition_interval_frames=args.matched_recognition_interval_frames,
     )
     output = StreamOutput(args.record_video, args.snapshot_dir)
     if engine.startup_output:
