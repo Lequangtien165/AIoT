@@ -10,7 +10,7 @@
 
 ## P1 - Realtime Reliability
 
-- [ ] Benchmark FPS, CPU usage, concurrent faces, and recognition latency.
+- [ ] Benchmark SCRFD latency, ArcFace latency, embeddings per cycle, FPS, CPU/GPU usage, concurrent faces, and recognition latency.
 - [ ] Tune the IoU threshold, track TTL, and recognition interval using a real camera.
 - [ ] Test reconnection after prolonged publisher, MediaMTX, or RTSP interruptions.
 - [ ] Test `VideoWriter` codec fallback on the target Windows machine.
@@ -50,6 +50,7 @@
 - [x] Reduced realtime recognition track TTL default and added `--matched-recognition-interval-frames` so already matched tracks are refreshed less aggressively.
 - [x] Prioritized recognition scheduling as `pending -> unknown -> matched` to reduce unnecessary repeated identity checks.
 - [x] Added profile counters for `active_tracks`, `visible_tracks`, and `stale_tracks` to confirm that boxes are not accumulating on screen.
+- [x] Split the realtime InsightFace `buffalo_l` path: SCRFD detects all faces, the tracker assigns all detections, and ArcFace embeds only scheduler-selected tracks (default budget: one per cycle).
 
 ### Validation Performed
 
@@ -60,7 +61,7 @@
 
 ### Still Open
 
-- [ ] Benchmark sustained runtime with multiple faces and record target values for `capture_fps`, `display_fps`, `recognition_fps`, GPU utilization, and recognition latency.
+- [ ] Benchmark sustained runtime with multiple faces and record target values for `capture_fps`, `display_fps`, detector/embedding latency, embeddings per cycle, GPU utilization, and recognition latency.
 - [ ] Calibrate `--threshold`, `--recognition-fps`, `--track-iou-threshold`, `--track-ttl-frames`, and `--matched-recognition-interval-frames` using real genuine/impostor samples.
 - [ ] Run long-duration tests for RTSP reconnects, snapshot/video output, VRAM stability, and storage growth.
 - [ ] Decide whether long occlusions or crowded face crossings require replacing the lightweight tracker with a stronger tracker such as SORT/DeepSORT.
