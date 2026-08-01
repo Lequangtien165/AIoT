@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from recognize_stream import LatestFrameReader, parse_args, snapshot_tracks
+from recognize_stream import LatestFrameReader, parse_args, snapshot_tracks, track_counts
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -37,6 +37,7 @@ class SnapshotTracksTests(unittest.TestCase):
                 "label": "Alice",
                 "score": 0.9,
                 "status": "matched",
+                "missed_frames": 0,
             },
         )()
 
@@ -48,6 +49,43 @@ class SnapshotTracksTests(unittest.TestCase):
         self.assertEqual(snapshot[0].label, "Alice")
         self.assertEqual(snapshot[0].score, 0.9)
         self.assertEqual(snapshot[0].status, "matched")
+        self.assertEqual(snapshot[0].missed_frames, 0)
+
+    def test_snapshot_tracks_excludes_missed_tracks(self):
+        active = type(
+            "Track",
+            (),
+            {
+                "track_id": 1,
+                "bbox": (1, 2, 3, 4),
+                "label": None,
+                "score": None,
+                "status": "pending",
+                "missed_frames": 0,
+            },
+        )()
+        missed = type(
+            "Track",
+            (),
+            {
+                "track_id": 2,
+                "bbox": (5, 6, 7, 8),
+                "label": "Alice",
+                "score": 0.9,
+                "status": "matched",
+                "missed_frames": 1,
+            },
+        )()
+
+        snapshot = snapshot_tracks([active, missed])
+
+        self.assertEqual([track.track_id for track in snapshot], [1])
+
+    def test_track_counts_reports_active_visible_and_stale(self):
+        active = type("Track", (), {"missed_frames": 0})()
+        stale = type("Track", (), {"missed_frames": 2})()
+
+        self.assertEqual(track_counts([active, stale], [active]), (1, 1, 1))
 
 
 class LatestFrameReaderTests(unittest.TestCase):
