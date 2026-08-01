@@ -25,6 +25,25 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.require_gpu)
         self.assertEqual(args.det_size, 512)
 
+    @patch(
+        "sys.argv",
+        [
+            "recognize_stream.py",
+            "--mqtt-host",
+            "127.0.0.1",
+            "--mqtt-port",
+            "1884",
+            "--mqtt-client-id",
+            "recognition-test",
+        ],
+    )
+    def test_parse_args_supports_mqtt_flags(self):
+        args = parse_args()
+
+        self.assertEqual(args.mqtt_host, "127.0.0.1")
+        self.assertEqual(args.mqtt_port, 1884)
+        self.assertEqual(args.mqtt_client_id, "recognition-test")
+
 
 class SnapshotTracksTests(unittest.TestCase):
     def test_snapshot_tracks_copies_runtime_fields(self):

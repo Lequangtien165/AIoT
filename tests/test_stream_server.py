@@ -23,6 +23,27 @@ class FfmpegCommandTests(unittest.TestCase):
         self.assertEqual(args.video_size, "1280x720")
         self.assertEqual(args.framerate, 30)
 
+    @patch(
+        "sys.argv",
+        [
+            "stream_server.py",
+            "--device",
+            "Camera A",
+            "--mqtt-host",
+            "127.0.0.1",
+            "--mqtt-port",
+            "1884",
+            "--heartbeat-interval",
+            "2",
+        ],
+    )
+    def test_parse_args_supports_mqtt_flags(self):
+        args = parse_args()
+
+        self.assertEqual(args.mqtt_host, "127.0.0.1")
+        self.assertEqual(args.mqtt_port, 1884)
+        self.assertEqual(args.heartbeat_interval, 2.0)
+
     def test_command_preserves_capture_rate_without_frame_duplication(self):
         args = argparse.Namespace(
             device="Rapoo camera", framerate=25, video_size="1280x720", bitrate="2M"
