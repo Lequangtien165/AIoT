@@ -14,6 +14,16 @@ class FaceTrackerTests(unittest.TestCase):
 
         self.assertEqual(first.track_id, second.track_id)
 
+    def test_update_with_assignments_maps_each_detection_to_one_track(self):
+        tracker = FaceTracker(min_face_size=1)
+
+        tracks, assignments = tracker.update_with_assignments(
+            [(0, 0, 100, 100), (200, 0, 300, 100)], 1
+        )
+
+        self.assertEqual([track.track_id for track in tracks], [1, 2])
+        self.assertEqual([(item.track_id, item.box_index) for item in assignments], [(1, 0), (2, 1)])
+
     def test_center_distance_fallback_keeps_track_id_when_iou_drops(self):
         tracker = FaceTracker(min_face_size=1)
         first = tracker.update([(0, 0, 100, 100)], 1)[0]
