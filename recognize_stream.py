@@ -105,6 +105,12 @@ def resize_for_display(frame: np.ndarray, display_width: int) -> tuple[np.ndarra
     return resized, scale
 
 
+def format_score(score: float | None) -> str:
+    if score is None:
+        return "n/a"
+    return f"{score:.3f}"
+
+
 def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool) -> None:
     for track in tracks:
         x1, y1, x2, y2 = scale_bbox(track.bbox, scale)
@@ -113,7 +119,7 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
             text = f"#{track.track_id} stale"
         elif track.status == "matched":
             color = (0, 180, 0)
-            text = f"#{track.track_id} {track.label} {track.score:.3f}"
+            text = f"#{track.track_id} {track.label} {format_score(track.score)}"
         elif track.status == "unknown":
             color = (0, 165, 255)
             text = f"#{track.track_id} UNKNOWN"
@@ -127,11 +133,11 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
 def log_event(event, snapshot_path) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     if event.kind == "identity_confirmed":
-        message = f'MATCH track={event.track_id} person="{event.label}" score={event.score:.3f}'
+        message = f'MATCH track={event.track_id} person="{event.label}" score={format_score(event.score)}'
     elif event.kind == "identity_changed":
         message = (
             f'IDENTITY_CHANGED track={event.track_id} from="{event.previous_label}" '
-            f'to="{event.label}" score={event.score:.3f}'
+            f'to="{event.label}" score={format_score(event.score)}'
         )
     else:
         message = f'UNKNOWN track={event.track_id} previous="{event.previous_label}"'
@@ -418,7 +424,6 @@ def main() -> int:
         recognition_interval_frames=1,
         matched_recognition_interval_frames=args.matched_recognition_interval_frames,
     )
-    output = StreamOutput(args.record_video, args.snapshot_dir)
     if engine.startup_output:
         print(engine.startup_output, file=sys.stderr)
     provider_display = ", ".join(engine.providers)
