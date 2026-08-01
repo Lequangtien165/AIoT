@@ -13,7 +13,8 @@ from aiot.mqtt.client import MqttClient, password_from_env
 from aiot.mqtt.topics import AUDIT_TOPICS, TOPIC_POLICIES
 
 
-DEFAULT_DB_PATH = Path("database/audit_log.sqlite3")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+AUDIT_DB_DIR = PROJECT_ROOT / "database"
 
 
 def is_audit_topic(topic: str) -> bool:
@@ -25,12 +26,25 @@ def is_audit_topic(topic: str) -> bool:
     return False
 
 
+def resolve_audit_db_path(path: str | Path | None = None) -> Path:
+    """Return a SQLite path contained by the project's audit-data directory."""
+    raw_path = Path(path) if path is not None else AUDIT_DB_DIR / "audit_log.sqlite3"
+    if str(raw_path).lower().startswith("file:") or raw_path.suffix.lower() != ".sqlite3":
+        raise ValueError("Audit database path must be a .sqlite3 file under database/.")
+
+    database_dir = AUDIT_DB_DIR.resolve()
+    resolved_path = raw_path.resolve()
+    if not resolved_path.is_relative_to(database_dir):
+        raise ValueError("Audit database path must be inside database/.")
+    return resolved_path
+
+
 class AuditStore:
-    def __init__(self, path: str | Path = DEFAULT_DB_PATH) -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = resolve_audit_db_path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        self._connection = sqlite3.connect(self.path, uri=False, check_same_thread=False)
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS mqtt_audit_events (
@@ -76,7 +90,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--client-id", default="aiot-audit-logger")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
-    parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
     args = parser.parse_args()
     if args.mqtt_username:
         try:
@@ -87,7 +100,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_logger(args: argparse.Namespace) -> None:
-    store = AuditStore(args.db_path)
+    store = AuditStore()
 
     def on_message(topic: str, payload: dict[str, Any]) -> None:
         if not is_audit_topic(topic):

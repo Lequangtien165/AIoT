@@ -30,6 +30,15 @@ class FaceTrackerTests(unittest.TestCase):
 
         self.assertEqual(tracker.tracks, {})
 
+    def test_track_survives_until_missed_frames_exceed_ttl(self):
+        tracker = FaceTracker(ttl_frames=1, min_face_size=1)
+        tracker.update([(10, 10, 110, 110)], 1)
+
+        tracker.update([], 2)
+
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(tracker.tracks[1].missed_frames, 1)
+
     def test_scheduler_respects_age_interval_and_limit(self):
         tracker = FaceTracker(
             min_age_frames=2,
@@ -87,6 +96,17 @@ class FaceTrackerTests(unittest.TestCase):
         self.assertIsNone(tracker.apply_recognition(track.track_id, "", 0.2, 0.45))
         event = tracker.apply_recognition(track.track_id, "", 0.2, 0.45)
         self.assertEqual(event.kind, "identity_lost")
+
+    def test_identity_change_requires_score_margin(self):
+        tracker = FaceTracker(min_face_size=1, label_confirmations=1, label_switch_margin=0.05)
+        track = tracker.update([(0, 0, 100, 100)], 1)[0]
+        tracker.apply_recognition(track.track_id, "An", 0.8, 0.45)
+
+        self.assertIsNone(tracker.apply_recognition(track.track_id, "Binh", 0.84, 0.45))
+        event = tracker.apply_recognition(track.track_id, "Binh", 0.86, 0.45)
+
+        self.assertEqual(event.kind, "identity_changed")
+        self.assertEqual(track.label, "Binh")
 
 
 if __name__ == "__main__":

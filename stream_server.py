@@ -118,9 +118,9 @@ def parse_macos_devices(output: str) -> list[CameraDevice]:
         if "AVFoundation audio devices:" in line:
             break
         if in_video_section:
-            match = re.search(r"\[(\d+)\]\s+(.+)$", line)
+            match = re.search(r"\[(\d+)\][ \t]+(\S.*)\Z", line)
             if match:
-                devices.append(CameraDevice(match.group(2), match.group(1)))
+                devices.append(CameraDevice(match.group(2).rstrip(), match.group(1)))
     return devices
 
 
@@ -298,6 +298,65 @@ def stop_process(process: subprocess.Popen[bytes] | None) -> None:
         process.wait()
 
 
+def resolve_device(args: argparse.Namespace, config: PlatformConfig) -> int | None:
+    if args.list_devices:
+        return list_devices(config)
+    if args.device:
+        return None
+    devices, status, output = get_video_devices(config)
+    if status:
+        print("Could not query video devices.", file=sys.stderr)
+        print_device_query_diagnostic(output)
+        return status
+    if not devices:
+        print("No video devices found.", file=sys.stderr)
+        return 1
+    args.device = choose_device(devices)
+    return None if args.device is not None else 1
+
+
+def handle_control_message(stop_requested: threading.Event, topic: str, message: dict) -> None:
+    if topic != TOPIC_CONTROL_STREAM:
+        return
+    action = validate_control_stream_action(message)
+    if action is None:
+        print("Ignoring invalid MQTT stream control payload.", file=sys.stderr)
+    elif action == "stop":
+        print("Received MQTT stop command.")
+        stop_requested.set()
+    elif action in {"start", "restart"}:
+        print(f"Received MQTT {action} command, but this process is already running.")
+    else:
+        print(f"Ignoring unsupported MQTT stream action: {action}", file=sys.stderr)
+
+
+def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> MqttClient | None:
+    if not args.mqtt_host:
+        return None
+    client = MqttClient(
+        host=args.mqtt_host,
+        port=args.mqtt_port,
+        client_id=args.mqtt_client_id,
+        username=args.mqtt_username,
+        password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+        on_message=lambda topic, message: handle_control_message(stop_requested, topic, message),
+    )
+    client.subscribe(TOPIC_CONTROL_STREAM, qos=TOPIC_POLICIES[TOPIC_CONTROL_STREAM].qos)
+    client.connect()
+    publish_mqtt(
+        client,
+        TOPIC_SYSTEM_STATUS,
+        payloads.system_status(
+            device_id=args.mqtt_client_id,
+            component="rtsp-publisher",
+            state="starting",
+            message="RTSP publisher is starting.",
+            metrics={"rtsp_url": RTSP_URL},
+        ),
+    )
+    return client
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -307,65 +366,16 @@ def main() -> int:
         return 1
     if not require_tools(config):
         return 1
-    if args.list_devices:
-        return list_devices(config)
-    if not args.device:
-        devices, status, output = get_video_devices(config)
-        if status:
-            print("Could not query video devices.", file=sys.stderr)
-            print_device_query_diagnostic(output)
-            return status
-        if not devices:
-            print("No video devices found.", file=sys.stderr)
-            return 1
-        args.device = choose_device(devices)
-        if args.device is None:
-            return 1
+    device_status = resolve_device(args, config)
+    if device_status is not None:
+        return device_status
 
     stop_requested = threading.Event()
-    mqtt_client: MqttClient | None = None
-
-    def on_control_message(topic: str, message: dict) -> None:
-        if topic != TOPIC_CONTROL_STREAM:
-            return
-        action = validate_control_stream_action(message)
-        if action is None:
-            print("Ignoring invalid MQTT stream control payload.", file=sys.stderr)
-            return
-        if action == "stop":
-            print("Received MQTT stop command.")
-            stop_requested.set()
-        elif action in {"start", "restart"}:
-            print(f"Received MQTT {action} command, but this process is already running.")
-        else:
-            print(f"Ignoring unsupported MQTT stream action: {action}", file=sys.stderr)
-
-    if args.mqtt_host:
-        try:
-            mqtt_client = MqttClient(
-                host=args.mqtt_host,
-                port=args.mqtt_port,
-                client_id=args.mqtt_client_id,
-                username=args.mqtt_username,
-                password=password_from_env(args.mqtt_username, args.mqtt_password_env),
-                on_message=on_control_message,
-            )
-            mqtt_client.subscribe(TOPIC_CONTROL_STREAM, qos=TOPIC_POLICIES[TOPIC_CONTROL_STREAM].qos)
-            mqtt_client.connect()
-            publish_mqtt(
-                mqtt_client,
-                TOPIC_SYSTEM_STATUS,
-                payloads.system_status(
-                    device_id=args.mqtt_client_id,
-                    component="rtsp-publisher",
-                    state="starting",
-                    message="RTSP publisher is starting.",
-                    metrics={"rtsp_url": RTSP_URL},
-                ),
-            )
-        except MqttUnavailable as error:
-            print(f"[MQTT] {error}", file=sys.stderr)
-            return 1
+    try:
+        mqtt_client = connect_mqtt(args, stop_requested)
+    except MqttUnavailable as error:
+        print(f"[MQTT] {error}", file=sys.stderr)
+        return 1
 
     mediamtx = subprocess.Popen([str(config.mediamtx_path), str(MEDIA_MTX_CONFIG)])
     ffmpeg: subprocess.Popen[bytes] | None = None

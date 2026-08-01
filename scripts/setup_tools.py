@@ -37,12 +37,15 @@ FFMPEG_URL = (
 )
 FFMPEG_SHA256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
 FFMPEG_EXE_SHA256 = "1326dde4c84ff1f96fe6b8916c5bed29e163e9b5dccf995f6f3db069d143ec5e"
+FFMPEG_EXECUTABLE = "ffmpeg.exe"
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def download_ssl_context() -> ssl.SSLContext:
     """Use certifi so Python's trust store works consistently on macOS."""
-    return ssl.create_default_context(cafile=certifi.where())
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 
 def format_size(size: float) -> str:
@@ -131,6 +134,57 @@ def safe_extract_tar(tar_file: tarfile.TarFile, destination: Path) -> None:
     tar_file.extractall(destination, filter="data")
 
 
+def executable_path(destination: Path, executable: str) -> Path:
+    if executable == FFMPEG_EXECUTABLE:
+        return destination / "bin" / executable
+    return destination / executable
+
+
+def existing_install_is_valid(path: Path, checksum: str | None) -> bool:
+    if not path.is_file():
+        return False
+    print("  Checking existing installation...")
+    if checksum is None:
+        print(f"  Already installed from a verified archive: {path}")
+        return True
+    try:
+        verify_checksum(path, checksum)
+    except RuntimeError:
+        print("  Existing installation failed verification; reinstalling.")
+        return False
+    print(f"  Already installed and verified: {path}")
+    return True
+
+
+def extract_archive(archive: Path, extracted: Path, archive_type: str) -> None:
+    if archive_type == "zip":
+        with zipfile.ZipFile(archive) as zip_file:
+            safe_extract(zip_file, extracted)
+        return
+    with tarfile.open(archive, "r:gz") as tar_file:
+        safe_extract_tar(tar_file, extracted)
+
+
+def install_extracted_files(source: Path, destination: Path, executable: str) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    if executable == FFMPEG_EXECUTABLE:
+        shutil.copytree(source.parent.parent, destination, dirs_exist_ok=True)
+        return
+    for file_path in source.parent.iterdir():
+        if file_path.is_file():
+            shutil.copy2(file_path, destination / file_path.name)
+
+
+def verify_installed_executable(path: Path, checksum: str | None) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"Installation did not create {path}.")
+    if os.name != "nt":
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    if checksum:
+        print("  Verifying installation...")
+        verify_checksum(path, checksum)
+
+
 def install_archive(
     stage: str,
     tool_name: str,
@@ -143,22 +197,9 @@ def install_archive(
     archive_type: str,
 ) -> None:
     print(f"{stage} {tool_name}")
-    executable_path = (
-        destination / "bin" / executable if executable == "ffmpeg.exe" else destination / executable
-    )
-    if executable_path.is_file() and not force:
-        print("  Checking existing installation...")
-        if executable_checksum:
-            try:
-                verify_checksum(executable_path, executable_checksum)
-            except RuntimeError:
-                print("  Existing installation failed verification; reinstalling.")
-            else:
-                print(f"  Already installed and verified: {executable_path}")
-                return
-        else:
-            print(f"  Already installed from a verified archive: {executable_path}")
-            return
+    installed_executable = executable_path(destination, executable)
+    if not force and existing_install_is_valid(installed_executable, executable_checksum):
+        return
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -169,36 +210,14 @@ def install_archive(
         print("  Verifying archive checksum...")
         verify_checksum(archive, checksum)
         print("  Extracting archive...")
-
-        if archive_type == "zip":
-            with zipfile.ZipFile(archive) as zip_file:
-                safe_extract(zip_file, extracted)
-        else:
-            with tarfile.open(archive, "r:gz") as tar_file:
-                safe_extract_tar(tar_file, extracted)
-
+        extract_archive(archive, extracted, archive_type)
         source = next(extracted.rglob(executable), None)
         if source is None:
             raise RuntimeError(f"Archive does not contain {executable}.")
-
         print(f"  Installing to {destination.relative_to(PROJECT_ROOT)}...")
-        destination.mkdir(parents=True, exist_ok=True)
-        if executable == "ffmpeg.exe":
-            source_root = source.parent.parent
-            shutil.copytree(source_root, destination, dirs_exist_ok=True)
-        else:
-            for file_path in source.parent.iterdir():
-                if file_path.is_file():
-                    shutil.copy2(file_path, destination / file_path.name)
-
-        if not executable_path.is_file():
-            raise RuntimeError(f"Installation did not create {executable_path}.")
-        if os.name != "nt":
-            executable_path.chmod(executable_path.stat().st_mode | stat.S_IXUSR)
-        if executable_checksum:
-            print("  Verifying installation...")
-            verify_checksum(executable_path, executable_checksum)
-        print(f"  Installed successfully: {executable_path}")
+        install_extracted_files(source, destination, executable)
+        verify_installed_executable(installed_executable, executable_checksum)
+        print(f"  Installed successfully: {installed_executable}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -305,7 +324,7 @@ def main() -> int:
                 FFMPEG_URL,
                 FFMPEG_SHA256,
                 TOOLS_DIR / "ffmpeg",
-                "ffmpeg.exe",
+                FFMPEG_EXECUTABLE,
                 FFMPEG_EXE_SHA256,
                 args.force,
                 "zip",

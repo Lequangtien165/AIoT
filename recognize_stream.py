@@ -215,6 +215,14 @@ def track_counts(tracks: list[object], visible_tracks: list[DisplayTrack]) -> tu
     return active_tracks, len(visible_tracks), stale_tracks
 
 
+def matching_track_for_bbox(tracks: list[object], bbox: tuple[int, int, int, int]):
+    """Return the visible track whose box exactly matches an observation."""
+    for track in tracks:
+        if track.missed_frames == 0 and track.bbox == bbox:
+            return track
+    return None
+
+
 class LatestFrameReader:
     def __init__(self, source: str, mirror: bool, reconnect_delay: float) -> None:
         self.source = source
@@ -358,63 +366,71 @@ class RecognitionWorker:
             last_frame_id = stream_frame.frame_id
             next_run = now + self.period
             started = time.monotonic()
-            events = []
-            try:
-                observations = self.engine.extract_faces(stream_frame.frame)
-                tracks = self.tracker.update([item.bbox for item in observations], stream_frame.frame_id)
-                observation_by_track = {}
-                for observation in observations:
-                    matched_track = max(
-                        tracks,
-                        key=lambda track: (
-                            1.0 if track.missed_frames == 0 and track.bbox == observation.bbox else 0.0,
-                            0.0,
-                        ),
-                        default=None,
-                    )
-                    if matched_track is not None:
-                        observation_by_track[matched_track.track_id] = observation
+            outcome = self._process_frame(stream_frame)
+            result_id = self._store_result(result_id, stream_frame, started, outcome)
 
-                selected = self.tracker.select_for_recognition(stream_frame.frame_id, maximum=len(observations) or 1)
-                for track in selected:
-                    observation = observation_by_track.get(track.track_id)
-                    if observation is None:
-                        event = self.tracker.apply_recognition(track.track_id, None, None, self.threshold)
-                    else:
-                        name, score = self.recognizer.search(observation.embedding, self.top_k)[0]
-                        event = self.tracker.apply_recognition(track.track_id, name, score, self.threshold)
-                    if event is not None:
-                        events.append(event)
-                tracks_to_display = snapshot_tracks(tracks)
-                active_tracks, visible_tracks, stale_tracks = track_counts(tracks, tracks_to_display)
-            except Exception as error:
-                print(f"[WARNING] Could not run InsightFace on frame {stream_frame.frame_id}: {error}", file=sys.stderr)
-                if self.on_pipeline_error is not None:
-                    self.on_pipeline_error(stream_frame.frame_id, error)
-                tracks_to_display = snapshot_tracks(list(self.tracker.tracks.values()))
-                active_tracks, visible_tracks, stale_tracks = track_counts(list(self.tracker.tracks.values()), tracks_to_display)
+    def _process_frame(self, stream_frame: StreamFrame):
+        try:
+            observations = self.engine.extract_faces(stream_frame.frame)
+            tracks = self.tracker.update([item.bbox for item in observations], stream_frame.frame_id)
+            events = self._recognize_tracks(stream_frame.frame_id, observations, tracks)
+            tracks_to_display = snapshot_tracks(tracks)
+            return tracks_to_display, events, track_counts(tracks, tracks_to_display)
+        except Exception as error:
+            print(f"[WARNING] Could not run InsightFace on frame {stream_frame.frame_id}: {error}", file=sys.stderr)
+            if self.on_pipeline_error is not None:
+                self.on_pipeline_error(stream_frame.frame_id, error)
+            tracks = list(self.tracker.tracks.values())
+            tracks_to_display = snapshot_tracks(tracks)
+            return tracks_to_display, [], track_counts(tracks, tracks_to_display)
 
-            latency_ms = (time.monotonic() - started) * 1000.0
-            result_id += 1
-            result = RecognitionResult(
-                result_id=result_id,
-                frame_id=stream_frame.frame_id,
-                timestamp=time.monotonic(),
-                latency_ms=latency_ms,
-                tracks=tracks_to_display,
-                events=events,
-                active_tracks=active_tracks,
-                visible_tracks=visible_tracks,
-                stale_tracks=stale_tracks,
-            )
-            with self._lock:
-                self._latest_result = result
-                self._processed_frames += 1
-                self._latency_total_ms += latency_ms
-                self._last_latency_ms = latency_ms
-                self._active_tracks = active_tracks
-                self._visible_tracks = visible_tracks
-                self._stale_tracks = stale_tracks
+    def _recognize_tracks(self, frame_id: int, observations, tracks: list[object]) -> list[object]:
+        observation_by_track = {}
+        for observation in observations:
+            track = matching_track_for_bbox(tracks, observation.bbox)
+            if track is not None:
+                observation_by_track[track.track_id] = observation
+
+        events = []
+        selected = self.tracker.select_for_recognition(frame_id, maximum=len(observations) or 1)
+        for track in selected:
+            observation = observation_by_track.get(track.track_id)
+            event = self._recognize_track(track, observation)
+            if event is not None:
+                events.append(event)
+        return events
+
+    def _recognize_track(self, track, observation):
+        if observation is None:
+            return self.tracker.apply_recognition(track.track_id, None, None, self.threshold)
+        name, score = self.recognizer.search(observation.embedding, self.top_k)[0]
+        return self.tracker.apply_recognition(track.track_id, name, score, self.threshold)
+
+    def _store_result(self, result_id: int, stream_frame: StreamFrame, started: float, outcome) -> int:
+        tracks, events, counts = outcome
+        active_tracks, visible_tracks, stale_tracks = counts
+        latency_ms = (time.monotonic() - started) * 1000.0
+        result_id += 1
+        result = RecognitionResult(
+            result_id=result_id,
+            frame_id=stream_frame.frame_id,
+            timestamp=time.monotonic(),
+            latency_ms=latency_ms,
+            tracks=tracks,
+            events=events,
+            active_tracks=active_tracks,
+            visible_tracks=visible_tracks,
+            stale_tracks=stale_tracks,
+        )
+        with self._lock:
+            self._latest_result = result
+            self._processed_frames += 1
+            self._latency_total_ms += latency_ms
+            self._last_latency_ms = latency_ms
+            self._active_tracks = active_tracks
+            self._visible_tracks = visible_tracks
+            self._stale_tracks = stale_tracks
+        return result_id
 
 
 def print_profile(
@@ -453,6 +469,74 @@ def print_profile(
         file=sys.stderr,
     )
     return capture_frames, recognition_frames, display_frames, now
+
+
+def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker, output, mqtt_client) -> None:
+    display_frames = 0
+    consumed_result_id = 0
+    last_rendered_frame_id = 0
+    last_rendered_result_id = 0
+    last_capture_frames = 0
+    last_recognition_frames = 0
+    last_display_frames = 0
+    last_profile_time = time.monotonic()
+    while True:
+        stream_frame = reader.latest()
+        if stream_frame is None:
+            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                return
+            continue
+
+        result = worker.latest_result()
+        result_id = result.result_id if result is not None else 0
+        if stream_frame.frame_id == last_rendered_frame_id and result_id == last_rendered_result_id:
+            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                return
+            continue
+        last_rendered_frame_id = stream_frame.frame_id
+        last_rendered_result_id = result_id
+        display_frame, display_scale = resize_for_display(stream_frame.frame, 1280)
+        if display_frame is stream_frame.frame:
+            display_frame = display_frame.copy()
+        if result is not None:
+            stale = time.monotonic() - result.timestamp > max(0.5, 2.0 / args.recognition_fps)
+            draw_tracks(display_frame, result.tracks, display_scale, stale)
+            if result.result_id != consumed_result_id:
+                consumed_result_id = result.result_id
+                event_payloads = handle_result_events(result, stream_frame.frame, output)
+                publish_mqtt(
+                    mqtt_client,
+                    TOPIC_RECOGNITION_RESULT,
+                    payloads.recognition_result(
+                        source=args.source,
+                        frame_id=result.frame_id,
+                        result_id=result.result_id,
+                        latency_ms=result.latency_ms,
+                        tracks=[track_payload(track) for track in result.tracks],
+                        events=event_payloads,
+                    ),
+                )
+        output.write_frame(display_frame, stream_frame.source_fps)
+        cv2.imshow(WINDOW_TITLE, display_frame)
+        display_frames += 1
+        if args.profile and time.monotonic() - last_profile_time >= 2.0:
+            last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = print_profile(
+                reader, worker, display_frames, last_capture_frames, last_recognition_frames,
+                last_display_frames, last_profile_time,
+            )
+        if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            return
+
+
+def handle_result_events(result: RecognitionResult, frame: np.ndarray, output) -> list[dict[str, Any]]:
+    event_payloads = []
+    for event in result.events:
+        snapshot = None
+        if event.kind in {"identity_confirmed", "identity_changed"}:
+            snapshot = output.save_snapshot(frame, event.track_id, event.label or "unknown", event.score or 0.0)
+        log_event(event, snapshot)
+        event_payloads.append(event_payload(event, str(snapshot) if snapshot is not None else None))
+    return event_payloads
 
 
 def main() -> int:
@@ -542,84 +626,10 @@ def main() -> int:
         on_pipeline_error=on_pipeline_error,
     )
 
-    display_frames = 0
-    consumed_result_id = 0
-    last_rendered_frame_id = 0
-    last_rendered_result_id = 0
-    last_capture_frames = 0
-    last_recognition_frames = 0
-    last_display_frames = 0
-    last_profile_time = time.monotonic()
-
     reader.start()
     worker.start()
     try:
-        while True:
-            stream_frame = reader.latest()
-            if stream_frame is None:
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
-                    break
-                continue
-
-            result = worker.latest_result()
-            result_id = result.result_id if result is not None else 0
-            if stream_frame.frame_id == last_rendered_frame_id and result_id == last_rendered_result_id:
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
-                    break
-                continue
-            last_rendered_frame_id = stream_frame.frame_id
-            last_rendered_result_id = result_id
-
-            display_frame, display_scale = resize_for_display(stream_frame.frame, 1280)
-            if display_frame is stream_frame.frame:
-                display_frame = display_frame.copy()
-
-            if result is not None:
-                stale = time.monotonic() - result.timestamp > max(0.5, 2.0 / args.recognition_fps)
-                draw_tracks(display_frame, result.tracks, display_scale, stale)
-                if result.result_id != consumed_result_id:
-                    consumed_result_id = result.result_id
-                    event_payloads = []
-                    for event in result.events:
-                        snapshot = None
-                        if event.kind in {"identity_confirmed", "identity_changed"}:
-                            snapshot = output.save_snapshot(stream_frame.frame, event.track_id, event.label or "unknown", event.score or 0.0)
-                        log_event(event, snapshot)
-                        event_payloads.append(event_payload(event, str(snapshot) if snapshot is not None else None))
-                    publish_mqtt(
-                        mqtt_client,
-                        TOPIC_RECOGNITION_RESULT,
-                        payloads.recognition_result(
-                            source=args.source,
-                            frame_id=result.frame_id,
-                            result_id=result.result_id,
-                            latency_ms=result.latency_ms,
-                            tracks=[track_payload(track) for track in result.tracks],
-                            events=event_payloads,
-                        ),
-                    )
-
-            output.write_frame(display_frame, stream_frame.source_fps)
-            cv2.imshow(WINDOW_TITLE, display_frame)
-            display_frames += 1
-
-            if args.profile and time.monotonic() - last_profile_time >= 2.0:
-                (
-                    last_capture_frames,
-                    last_recognition_frames,
-                    last_display_frames,
-                    last_profile_time,
-                ) = print_profile(
-                    reader,
-                    worker,
-                    display_frames,
-                    last_capture_frames,
-                    last_recognition_frames,
-                    last_display_frames,
-                    last_profile_time,
-                )
-            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
-                break
+        run_display_loop(args, reader, worker, output, mqtt_client)
     except KeyboardInterrupt:
         return 0
     finally:
