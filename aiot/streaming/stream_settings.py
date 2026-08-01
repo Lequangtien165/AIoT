@@ -1,4 +1,4 @@
-"""Shared settings for the local-only RTSP pipeline."""
+"""Shared loopback publisher settings for the RTSP pipeline."""
 
 RTSP_HOST = "127.0.0.1"
 RTSP_PORT = 8554
