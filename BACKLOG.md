@@ -25,7 +25,9 @@
 
 ## P3 - Expansion
 
-- [ ] Support RTSP from network cameras/Raspberry Pi instead of only `127.0.0.1`.
+- [x] Accept a custom network RTSP URL in cloud detection and recognition clients.
+- [x] Validate a real-camera RTSP source from Ubuntu Linux ARM64 over the LAN.
+- [ ] Validate RTSP input from Raspberry Pi 4 and Pi Camera.
 - [ ] Add JSON/API events for external systems.
 - [ ] Upgrade the IoU tracker if long occlusions or crowded crossings become necessary.
 - [ ] Define recording policy, retention, and biometric-data protections before retaining data long term.
@@ -62,3 +64,12 @@
 - [ ] Calibrate `--threshold`, `--recognition-fps`, `--track-iou-threshold`, `--track-ttl-frames`, and `--matched-recognition-interval-frames` using real genuine/impostor samples.
 - [ ] Run long-duration tests for RTSP reconnects, snapshot/video output, VRAM stability, and storage growth.
 - [ ] Decide whether long occlusions or crowded face crossings require replacing the lightweight tracker with a stronger tracker such as SORT/DeepSORT.
+
+## 2026-08-01 Progress Notes
+
+### Completed - Linux ARM64 Edge Publisher Validation
+
+- [x] Added and validated the Linux ARM64 V4L2 publisher: webcam -> FFmpeg -> MediaMTX -> LAN RTSP -> Windows detection and recognition.
+- [x] Verified Windows cloud consumers reconnect after the Linux ARM64 publisher is restarted.
+- [x] Confirmed stable sustained streaming from the Ubuntu ARM64 VM with the project publisher code.
+- [ ] Validate the separate Raspberry Pi 4 and Pi Camera hardware path.
