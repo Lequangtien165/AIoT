@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -24,6 +25,17 @@ def _load_mqtt_module():
             "python -m pip install -r requirements.txt."
         ) from error
     return mqtt
+
+
+def password_from_env(username: str | None, password_env: str | None) -> str | None:
+    if not username:
+        return None
+    if not password_env:
+        raise ValueError("--mqtt-password-env is required when --mqtt-username is set.")
+    password = os.environ.get(password_env)
+    if password is None:
+        raise ValueError(f"Environment variable {password_env} is not set.")
+    return password
 
 
 class MqttClient:
@@ -86,5 +98,7 @@ class MqttClient:
             payload = json.loads(message.payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             payload = {"raw": message.payload.decode("utf-8", errors="replace")}
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
         self._on_message(message.topic, payload)
 

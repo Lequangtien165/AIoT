@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttUnavailable
+from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
 from aiot.mqtt.topics import TOPIC_ERROR_PIPELINE, TOPIC_POLICIES, TOPIC_RECOGNITION_RESULT, TOPIC_SYSTEM_STATUS
 from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
@@ -75,6 +75,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-host", help="MQTT broker host for recognition/result events.")
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--mqtt-client-id", default="aiot-recognition")
+    parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
+    parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -87,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         or args.matched_recognition_interval_frames <= 0
     ):
         parser.error("reconnect and track values must be greater than 0.")
+    if args.mqtt_username:
+        try:
+            password_from_env(args.mqtt_username, args.mqtt_password_env)
+        except ValueError as error:
+            parser.error(str(error))
     return args
 
 
@@ -103,8 +110,6 @@ def publish_mqtt(client: MqttClient | None, topic: str, payload: dict[str, Any])
 
 
 def scale_bbox(bbox: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
-    if scale == 1.0:
-        return bbox
     x1, y1, x2, y2 = bbox
     return (
         int(x1 * scale),
@@ -124,6 +129,12 @@ def resize_for_display(frame: np.ndarray, display_width: int) -> tuple[np.ndarra
     return resized, scale
 
 
+def format_score(score: float | None) -> str:
+    if score is None:
+        return "n/a"
+    return f"{score:.3f}"
+
+
 def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool) -> None:
     for track in tracks:
         x1, y1, x2, y2 = scale_bbox(track.bbox, scale)
@@ -132,7 +143,7 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
             text = f"#{track.track_id} stale"
         elif track.status == "matched":
             color = (0, 180, 0)
-            text = f"#{track.track_id} {track.label} {track.score:.3f}"
+            text = f"#{track.track_id} {track.label} {format_score(track.score)}"
         elif track.status == "unknown":
             color = (0, 165, 255)
             text = f"#{track.track_id} UNKNOWN"
@@ -146,11 +157,11 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
 def log_event(event, snapshot_path) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     if event.kind == "identity_confirmed":
-        message = f'MATCH track={event.track_id} person="{event.label}" score={event.score:.3f}'
+        message = f'MATCH track={event.track_id} person="{event.label}" score={format_score(event.score)}'
     elif event.kind == "identity_changed":
         message = (
             f'IDENTITY_CHANGED track={event.track_id} from="{event.previous_label}" '
-            f'to="{event.label}" score={event.score:.3f}'
+            f'to="{event.label}" score={format_score(event.score)}'
         )
     else:
         message = f'UNKNOWN track={event.track_id} previous="{event.previous_label}"'
@@ -462,6 +473,8 @@ def main() -> int:
                 host=args.mqtt_host,
                 port=args.mqtt_port,
                 client_id=args.mqtt_client_id,
+                username=args.mqtt_username,
+                password=password_from_env(args.mqtt_username, args.mqtt_password_env),
             )
             mqtt_client.connect()
             publish_mqtt(
@@ -488,7 +501,6 @@ def main() -> int:
         recognition_interval_frames=1,
         matched_recognition_interval_frames=args.matched_recognition_interval_frames,
     )
-    output = StreamOutput(args.record_video, args.snapshot_dir)
     if engine.startup_output:
         print(engine.startup_output, file=sys.stderr)
     provider_display = ", ".join(engine.providers)

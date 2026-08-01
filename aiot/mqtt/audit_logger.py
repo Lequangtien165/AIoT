@@ -9,11 +9,20 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from aiot.mqtt.client import MqttClient
+from aiot.mqtt.client import MqttClient, password_from_env
 from aiot.mqtt.topics import AUDIT_TOPICS, TOPIC_POLICIES
 
 
 DEFAULT_DB_PATH = Path("database/audit_log.sqlite3")
+
+
+def is_audit_topic(topic: str) -> bool:
+    for subscription in AUDIT_TOPICS:
+        if subscription.endswith("/#") and topic.startswith(subscription[:-1]):
+            return True
+        if topic == subscription:
+            return True
+    return False
 
 
 class AuditStore:
@@ -65,14 +74,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-host", default="127.0.0.1")
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--client-id", default="aiot-audit-logger")
+    parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
+    parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mqtt_username:
+        try:
+            password_from_env(args.mqtt_username, args.mqtt_password_env)
+        except ValueError as error:
+            parser.error(str(error))
+    return args
 
 
 def run_logger(args: argparse.Namespace) -> None:
     store = AuditStore(args.db_path)
 
     def on_message(topic: str, payload: dict[str, Any]) -> None:
+        if not is_audit_topic(topic):
+            print(f"ignored topic={topic}")
+            return
         store.record(topic, payload)
         print(f"stored topic={topic} ts_ms={payload.get('ts_ms')}")
 
@@ -80,6 +100,8 @@ def run_logger(args: argparse.Namespace) -> None:
         host=args.mqtt_host,
         port=args.mqtt_port,
         client_id=args.client_id,
+        username=args.mqtt_username,
+        password=password_from_env(args.mqtt_username, args.mqtt_password_env),
         on_message=on_message,
     )
     for topic in AUDIT_TOPICS:
