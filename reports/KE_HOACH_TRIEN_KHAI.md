@@ -10,10 +10,12 @@
 
 ### 2. MQTT Control Plane
 
-- MQTT broker/client integration has been implemented as an optional runtime path using `paho-mqtt`.
+- MQTT broker/client integration has been implemented as an optional MVP runtime path using `paho-mqtt`.
 - The planned topics now exist in source: `motion/detected`, `system/status`, `error/*`, `control/stream`, and `recognition/result`.
 - `stream_server.py` can publish RTSP status/heartbeat messages and subscribe to `control/stream` for a stop command.
 - `recognize_stream.py` can publish `recognition/result`, recognition lifecycle status, and `error/pipeline`.
+- MQTT username/password support is available through CLI username flags and password environment variables; passwords are not passed directly on the command line.
+- `control/stream` payloads are validated by schema version and supported action before they can affect the publisher process.
 - PIR sensor support and motion-triggered streaming have not been implemented.
 - Broker-level runtime validation with Mosquitto has not been performed yet.
 
@@ -22,6 +24,7 @@
 - A logging service has been implemented at `scripts/run_mqtt_logger.py`.
 - Recognition audit trails, pipeline errors, and motion events are persisted to SQLite at `database/audit_log.sqlite3` by default.
 - Message payload builders, topic constants, QoS, retained-message policy, and audit topic subscriptions are defined under `aiot/mqtt/`.
+- The audit logger persists only configured audit topics: `recognition/result`, `motion/detected`, and `error/#`.
 - Unit tests cover schema builders, topic coverage, CLI MQTT flags, and SQLite audit persistence.
 - End-to-end validation with a live MQTT broker and real Pi-originated messages has not been performed yet.
 
