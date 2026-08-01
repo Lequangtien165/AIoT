@@ -11,6 +11,7 @@ from stream_server import (
     choose_device,
     get_video_devices,
     parse_args,
+    parse_linux_devices,
     parse_macos_devices,
 )
 
@@ -45,6 +46,21 @@ class FfmpegCommandTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("-g") + 1], "30")
         self.assertNotIn("-framerate", command)
+
+    def test_linux_uses_v4l2_and_cpu_h264_encoder(self):
+        args = argparse.Namespace(device="/dev/video0", framerate=30, video_size="1280x720", bitrate="2M")
+
+        command = build_ffmpeg_command(args, get_platform_config("Linux", "aarch64"))
+
+        self.assertIn("v4l2", command)
+        self.assertIn("/dev/video0", command)
+        self.assertIn("libx264", command)
+        self.assertIn("ultrafast", command)
+        self.assertIn("zerolatency", command)
+        self.assertNotIn("dshow", command)
+        self.assertNotIn("h264_videotoolbox", command)
+        self.assertNotIn("-realtime", command)
+        self.assertNotIn("-prio_speed", command)
 
 
 class DeviceSelectionTests(unittest.TestCase):
@@ -104,6 +120,39 @@ AVFoundation audio devices:
 
         self.assertEqual(status, 0)
         self.assertEqual(devices, [CameraDevice("FaceTime HD Camera", "0")])
+
+
+class LinuxDeviceTests(unittest.TestCase):
+    def test_v4l2_parser_returns_video_nodes(self):
+        output = """Parallels Virtual Camera (usb-0000:00:04.0-1):
+	/dev/video0
+	/dev/video1
+	/dev/media0
+"""
+
+        devices = parse_linux_devices(output)
+
+        self.assertEqual(
+            devices,
+            [
+                CameraDevice("Parallels Virtual Camera (usb-0000:00:04.0-1) (/dev/video0)", "/dev/video0"),
+                CameraDevice("Parallels Virtual Camera (usb-0000:00:04.0-1) (/dev/video1)", "/dev/video1"),
+            ],
+        )
+
+    @patch("stream_server.subprocess.run")
+    def test_v4l2_listing_succeeds_when_devices_are_parsed(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="Camera:\n\t/dev/video0\n",
+        )
+
+        devices, status, _ = get_video_devices(get_platform_config("Linux", "arm64"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(devices, [CameraDevice("Camera (/dev/video0)", "/dev/video0")])
+        self.assertEqual(run.call_args.args[0], ["v4l2-ctl", "--list-devices"])
 
 
 if __name__ == "__main__":

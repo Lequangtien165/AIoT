@@ -1,4 +1,4 @@
-# Local-only RTSP relay for the webcam publisher.
+# RTSP relay for the local publisher, reachable by trusted LAN clients.
 logLevel: info
 logDestinations: [stdout]
 

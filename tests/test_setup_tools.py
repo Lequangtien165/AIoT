@@ -1,5 +1,6 @@
 import hashlib
 import io
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -16,6 +17,7 @@ from scripts.setup_tools import (
     main,
     safe_extract,
     ssl,
+    verify_linux_ffmpeg,
     verify_checksum,
 )
 
@@ -167,6 +169,46 @@ class SetupOrderingTests(unittest.TestCase):
 
         self.assertEqual(order, ["ffmpeg", "mediamtx"])
         install_archive.assert_called_once()
+
+    @patch("scripts.setup_tools.install_archive")
+    @patch("scripts.setup_tools.verify_linux_ffmpeg")
+    @patch("scripts.setup_tools.mediamtx_download_spec", return_value=("linux_arm64.tar.gz", "tar.gz", "a" * 64))
+    @patch("scripts.setup_tools.get_platform_config")
+    @patch("scripts.setup_tools.parse_args")
+    def test_linux_verifies_system_ffmpeg_before_installing_mediamtx(
+        self, parse_args, get_config, download_spec, verify_ffmpeg, install_archive
+    ):
+        parse_args.return_value = type("Args", (), {"force": False})()
+        get_config.return_value = PlatformConfig(
+            name="linux-arm64",
+            capture_format="v4l2",
+            video_encoder="libx264",
+            ffmpeg_path=Path("/usr/bin/ffmpeg"),
+            mediamtx_path=Path("tools/mediamtx/mediamtx"),
+        )
+        order = []
+        verify_ffmpeg.side_effect = lambda _: order.append("ffmpeg")
+        install_archive.side_effect = lambda *_: order.append("mediamtx")
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(), 0)
+
+        self.assertEqual(order, ["ffmpeg", "mediamtx"])
+        install_archive.assert_called_once()
+
+
+class LinuxFfmpegVerificationTests(unittest.TestCase):
+    @patch("scripts.setup_tools.subprocess.run")
+    @patch.object(Path, "is_file", return_value=True)
+    def test_linux_ffmpeg_requires_v4l2_and_libx264(self, _is_file, run):
+        run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout=" D. v4l2 Video4Linux2 input"),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout=" V.... libx264 H.264"),
+        ]
+
+        verify_linux_ffmpeg(Path("/usr/bin/ffmpeg"))
+
+        self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

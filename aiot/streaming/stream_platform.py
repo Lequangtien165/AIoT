@@ -22,7 +22,9 @@ class PlatformConfig:
     def camera_input(self, device: str) -> str:
         if self.name == "windows":
             return f"video={device}"
-        return device if ":" in device else f"{device}:none"
+        if self.name == "macos-arm64":
+            return device if ":" in device else f"{device}:none"
+        return device
 
 
 def get_platform_config(
@@ -61,8 +63,18 @@ def get_platform_config(
             mediamtx_path=PROJECT_ROOT / "tools" / "mediamtx" / "mediamtx",
         )
 
+    if system == "Linux" and machine in {"arm64", "aarch64"}:
+        return PlatformConfig(
+            name="linux-arm64",
+            capture_format="v4l2",
+            video_encoder="libx264",
+            ffmpeg_path=Path(shutil.which("ffmpeg") or "ffmpeg"),
+            mediamtx_path=PROJECT_ROOT / "tools" / "mediamtx" / "mediamtx",
+        )
+
     raise RuntimeError(
-        "Unsupported platform. This project supports Windows AMD64 and macOS Apple Silicon (arm64)."
+        "Unsupported platform. This project supports Windows AMD64, macOS Apple Silicon, "
+        "and Linux ARM64."
     )
 
 
@@ -79,5 +91,11 @@ def mediamtx_download_spec(config: PlatformConfig) -> tuple[str, str, str]:
             "darwin_arm64.tar.gz",
             "tar.gz",
             "b57e9e2f2fe418b37048ab613ae05fb744ac260dbc3f2ba63a64f9f6cf00156e",
+        )
+    if config.name == "linux-arm64":
+        return (
+            "linux_arm64.tar.gz",
+            "tar.gz",
+            "9e5b38a5b5fcab1916341b024031b2fc5dc6a2059baed9ba3f3b0d3768d231a8",
         )
     raise RuntimeError(f"Unsupported MediaMTX platform: {config.name}")
