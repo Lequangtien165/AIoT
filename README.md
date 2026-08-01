@@ -216,21 +216,23 @@ python recognize_stream.py --recognition-fps 2 --profile --require-gpu
 The startup log should include:
 
 ```text
-FaceEngine providers: CUDAExecutionProvider, CPUExecutionProvider
+SCRFD providers: CUDAExecutionProvider, CPUExecutionProvider
+ArcFace providers: CUDAExecutionProvider, CPUExecutionProvider
 GPU active
 ```
 
-The window labels every tracked face with a cached identity. The display loop stays responsive because frame capture, InsightFace inference, and rendering run as separate stages. Press `Q`, `Esc`, or `Ctrl+C` to stop. If `--recognition-fps 2` is stable, increase it gradually:
+The production recognition path uses the InsightFace `buffalo_l` bundle only. SCRFD detects every face for tracking, then ArcFace creates an embedding only for scheduler-selected tracks. The default budget is one embedding per detection cycle, so a crowded frame does not trigger ArcFace work for every face at once. The display loop stays responsive because frame capture, inference, and rendering run as separate stages. Press `Q`, `Esc`, or `Ctrl+C` to stop. If `--recognition-fps 2` is stable, increase it gradually:
 
 ```powershell
 python recognize_stream.py \
   --threshold 0.45 \
   --recognition-fps 4 \
+  --max-embeddings-per-cycle 1 \
   --profile \
   --require-gpu
 ```
 
-Then try `--recognition-fps 6` if the GPU latency remains low. Use `--require-gpu` when the session must use CUDA and should exit immediately if ONNX Runtime falls back to CPU.
+Then try `--recognition-fps 6` if the GPU latency remains low. `--recognition-fps` controls SCRFD detection/tracking cycles; `--max-embeddings-per-cycle` controls the ArcFace budget and defaults to `1`. Use `--require-gpu` when the session must use CUDA and should exit immediately if either SCRFD or ArcFace falls back to CPU.
 
 Watch GPU usage from a third terminal:
 
@@ -287,7 +289,7 @@ python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1
 The recognition pipeline publishes `recognition/result`, `system/status`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
 
 ```powershell
-python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --db-path database/audit_log.sqlite3
+python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1
 ```
 
 The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`. `motion/detected` is reserved for the Raspberry Pi PIR edge client; real GPIO integration and live Mosquitto end-to-end validation remain pending. The web UI described in the architecture report is also outside this MQTT/audit MVP.
