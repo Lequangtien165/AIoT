@@ -52,6 +52,10 @@ class RecognitionResult:
     active_tracks: int
     visible_tracks: int
     stale_tracks: int
+    detected_faces: int
+    embeddings_generated: int
+    detection_latency_ms: float
+    embedding_latency_ms: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.45, help="Cosine similarity threshold (default: 0.45).")
     parser.add_argument("--top-k", type=int, default=5, help="Number of FAISS vectors to retrieve (default: 5).")
     parser.add_argument("--recognition-fps", type=float, default=6.0)
+    parser.add_argument(
+        "--max-embeddings-per-cycle",
+        type=int,
+        default=1,
+        help="Maximum ArcFace embeddings per SCRFD detection cycle (default: 1).",
+    )
     parser.add_argument("--track-iou-threshold", type=float, default=0.30)
     parser.add_argument("--track-ttl-frames", type=int, default=8)
     parser.add_argument("--min-track-age-frames", type=int, default=3)
@@ -80,8 +90,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
-    if args.top_k <= 0 or args.recognition_fps <= 0 or args.det_size <= 0:
-        parser.error("top-k, recognition-fps, and det-size must be greater than 0.")
+    if args.top_k <= 0 or args.recognition_fps <= 0 or args.det_size <= 0 or args.max_embeddings_per_cycle <= 0:
+        parser.error("top-k, recognition-fps, det-size, and max-embeddings-per-cycle must be greater than 0.")
     if (
         args.reconnect_delay <= 0
         or args.track_ttl_frames <= 0
@@ -215,14 +225,6 @@ def track_counts(tracks: list[object], visible_tracks: list[DisplayTrack]) -> tu
     return active_tracks, len(visible_tracks), stale_tracks
 
 
-def matching_track_for_bbox(tracks: list[object], bbox: tuple[int, int, int, int]):
-    """Return the visible track whose box exactly matches an observation."""
-    for track in tracks:
-        if track.missed_frames == 0 and track.bbox == bbox:
-            return track
-    return None
-
-
 class LatestFrameReader:
     def __init__(self, source: str, mirror: bool, reconnect_delay: float) -> None:
         self.source = source
@@ -302,6 +304,7 @@ class RecognitionWorker:
         recognizer: object,
         tracker: object,
         recognition_fps: float,
+        max_embeddings_per_cycle: int,
         top_k: int,
         threshold: float,
         on_pipeline_error=None,
@@ -311,6 +314,7 @@ class RecognitionWorker:
         self.recognizer = recognizer
         self.tracker = tracker
         self.period = 1.0 / recognition_fps
+        self.max_embeddings_per_cycle = max_embeddings_per_cycle
         self.top_k = top_k
         self.threshold = threshold
         self.on_pipeline_error = on_pipeline_error
@@ -324,6 +328,11 @@ class RecognitionWorker:
         self._active_tracks = 0
         self._visible_tracks = 0
         self._stale_tracks = 0
+        self._embeddings_generated = 0
+        self._last_detection_latency_ms = 0.0
+        self._detection_latency_total_ms = 0.0
+        self._last_embedding_latency_ms = 0.0
+        self._embedding_latency_total_ms = 0.0
 
     def start(self) -> None:
         self._thread.start()
@@ -336,13 +345,20 @@ class RecognitionWorker:
         with self._lock:
             return self._latest_result
 
-    def stats(self) -> tuple[int, float, float, int, int, int]:
+    def stats(self) -> tuple[int, int, float, float, float, float, float, float, int, int, int]:
         with self._lock:
             average = self._latency_total_ms / self._processed_frames if self._processed_frames else 0.0
+            average_detection = self._detection_latency_total_ms / self._processed_frames if self._processed_frames else 0.0
+            average_embedding = self._embedding_latency_total_ms / self._processed_frames if self._processed_frames else 0.0
             return (
                 self._processed_frames,
+                self._embeddings_generated,
                 self._last_latency_ms,
                 average,
+                self._last_detection_latency_ms,
+                average_detection,
+                self._last_embedding_latency_ms,
+                average_embedding,
                 self._active_tracks,
                 self._visible_tracks,
                 self._stale_tracks,
@@ -371,43 +387,63 @@ class RecognitionWorker:
 
     def _process_frame(self, stream_frame: StreamFrame):
         try:
-            observations = self.engine.extract_faces(stream_frame.frame)
-            tracks = self.tracker.update([item.bbox for item in observations], stream_frame.frame_id)
-            events = self._recognize_tracks(stream_frame.frame_id, observations, tracks)
+            detection_started = time.monotonic()
+            detections = self.engine.detect_faces(stream_frame.frame)
+            detection_latency_ms = (time.monotonic() - detection_started) * 1000.0
+            tracks, assignments = self.tracker.update_with_assignments(
+                [detection.bbox for detection in detections], stream_frame.frame_id
+            )
+            detection_by_track = {
+                assignment.track_id: detections[assignment.box_index]
+                for assignment in assignments
+            }
+            events, embeddings_generated, embedding_latency_ms = self._recognize_tracks(
+                stream_frame.frame_id,
+                stream_frame.frame,
+                detection_by_track,
+            )
             tracks_to_display = snapshot_tracks(tracks)
-            return tracks_to_display, events, track_counts(tracks, tracks_to_display)
+            return (
+                tracks_to_display,
+                events,
+                track_counts(tracks, tracks_to_display),
+                len(detections),
+                embeddings_generated,
+                detection_latency_ms,
+                embedding_latency_ms,
+            )
         except Exception as error:
             print(f"[WARNING] Could not run InsightFace on frame {stream_frame.frame_id}: {error}", file=sys.stderr)
             if self.on_pipeline_error is not None:
                 self.on_pipeline_error(stream_frame.frame_id, error)
             tracks = list(self.tracker.tracks.values())
             tracks_to_display = snapshot_tracks(tracks)
-            return tracks_to_display, [], track_counts(tracks, tracks_to_display)
+            return tracks_to_display, [], track_counts(tracks, tracks_to_display), 0, 0, 0.0, 0.0
 
-    def _recognize_tracks(self, frame_id: int, observations, tracks: list[object]) -> list[object]:
-        observation_by_track = {}
-        for observation in observations:
-            track = matching_track_for_bbox(tracks, observation.bbox)
-            if track is not None:
-                observation_by_track[track.track_id] = observation
-
+    def _recognize_tracks(self, frame_id: int, frame: np.ndarray, detection_by_track: dict):
         events = []
-        selected = self.tracker.select_for_recognition(frame_id, maximum=len(observations) or 1)
+        embeddings_generated = 0
+        embedding_started = time.monotonic()
+        selected = self.tracker.select_for_recognition(frame_id, maximum=self.max_embeddings_per_cycle)
         for track in selected:
-            observation = observation_by_track.get(track.track_id)
-            event = self._recognize_track(track, observation)
+            event, embedded = self._recognize_track(frame, track, detection_by_track.get(track.track_id))
+            embeddings_generated += int(embedded)
             if event is not None:
                 events.append(event)
-        return events
+        embedding_latency_ms = (time.monotonic() - embedding_started) * 1000.0
+        return events, embeddings_generated, embedding_latency_ms
 
-    def _recognize_track(self, track, observation):
-        if observation is None:
-            return self.tracker.apply_recognition(track.track_id, None, None, self.threshold)
-        name, score = self.recognizer.search(observation.embedding, self.top_k)[0]
-        return self.tracker.apply_recognition(track.track_id, name, score, self.threshold)
+    def _recognize_track(self, frame: np.ndarray, track, detection):
+        if detection is None:
+            return None, False
+        embedding = self.engine.embed_detected_face(frame, detection)
+        if embedding is None:
+            return None, False
+        name, score = self.recognizer.search(embedding.embedding, self.top_k)[0]
+        return self.tracker.apply_recognition(track.track_id, name, score, self.threshold), True
 
     def _store_result(self, result_id: int, stream_frame: StreamFrame, started: float, outcome) -> int:
-        tracks, events, counts = outcome
+        tracks, events, counts, detected_faces, embeddings_generated, detection_latency_ms, embedding_latency_ms = outcome
         active_tracks, visible_tracks, stale_tracks = counts
         latency_ms = (time.monotonic() - started) * 1000.0
         result_id += 1
@@ -421,12 +457,21 @@ class RecognitionWorker:
             active_tracks=active_tracks,
             visible_tracks=visible_tracks,
             stale_tracks=stale_tracks,
+            detected_faces=detected_faces,
+            embeddings_generated=embeddings_generated,
+            detection_latency_ms=detection_latency_ms,
+            embedding_latency_ms=embedding_latency_ms,
         )
         with self._lock:
             self._latest_result = result
             self._processed_frames += 1
+            self._embeddings_generated += embeddings_generated
             self._latency_total_ms += latency_ms
             self._last_latency_ms = latency_ms
+            self._last_detection_latency_ms = detection_latency_ms
+            self._detection_latency_total_ms += detection_latency_ms
+            self._last_embedding_latency_ms = embedding_latency_ms
+            self._embedding_latency_total_ms += embedding_latency_ms
             self._active_tracks = active_tracks
             self._visible_tracks = visible_tracks
             self._stale_tracks = stale_tracks
@@ -447,22 +492,33 @@ def print_profile(
     capture_frames = reader.frames_read()
     (
         recognition_frames,
+        embeddings_generated,
         last_latency_ms,
         average_latency_ms,
+        last_detection_latency_ms,
+        average_detection_latency_ms,
+        last_embedding_latency_ms,
+        average_embedding_latency_ms,
         active_tracks,
         visible_tracks,
         stale_tracks,
     ) = worker.stats()
     capture_fps = (capture_frames - last_capture_frames) / elapsed
     recognition_fps = (recognition_frames - last_recognition_frames) / elapsed
+    embedding_fps = embeddings_generated / max(1, recognition_frames)
     display_fps = (display_frames - last_display_frames) / elapsed
     print(
         "PROFILE "
         f"capture_fps={capture_fps:.1f} "
         f"display_fps={display_fps:.1f} "
         f"recognition_fps={recognition_fps:.1f} "
+        f"embedding_per_cycle={embedding_fps:.1f} "
         f"last_latency_ms={last_latency_ms:.1f} "
         f"avg_latency_ms={average_latency_ms:.1f} "
+        f"last_detection_ms={last_detection_latency_ms:.1f} "
+        f"avg_detection_ms={average_detection_latency_ms:.1f} "
+        f"last_embedding_ms={last_embedding_latency_ms:.1f} "
+        f"avg_embedding_ms={average_embedding_latency_ms:.1f} "
         f"active_tracks={active_tracks} "
         f"visible_tracks={visible_tracks} "
         f"stale_tracks={stale_tracks}",
@@ -587,8 +643,8 @@ def main() -> int:
     )
     if engine.startup_output:
         print(engine.startup_output, file=sys.stderr)
-    provider_display = ", ".join(engine.providers)
-    print(f"FaceEngine providers: {provider_display}", file=sys.stderr)
+    print(f"SCRFD providers: {', '.join(engine.detector_providers)}", file=sys.stderr)
+    print(f"ArcFace providers: {', '.join(engine.recognition_providers)}", file=sys.stderr)
     if engine.provider_status.gpu_active:
         print("GPU active", file=sys.stderr)
     elif engine.provider_status.gpu_requested:
@@ -621,6 +677,7 @@ def main() -> int:
         recognizer=recognizer,
         tracker=tracker,
         recognition_fps=args.recognition_fps,
+        max_embeddings_per_cycle=args.max_embeddings_per_cycle,
         top_k=args.top_k,
         threshold=args.threshold,
         on_pipeline_error=on_pipeline_error,
