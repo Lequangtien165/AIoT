@@ -41,10 +41,12 @@ class ChecksumTests(unittest.TestCase):
     @patch("scripts.setup_tools.ssl.create_default_context")
     @patch("scripts.setup_tools.certifi.where", return_value="/tmp/certifi.pem")
     def test_download_context_uses_certifi_bundle(self, certifi_where, create_context):
-        download_ssl_context()
+        context = download_ssl_context()
 
         certifi_where.assert_called_once_with()
         create_context.assert_called_once_with(cafile="/tmp/certifi.pem")
+        self.assertIs(context, create_context.return_value)
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
 
     def test_checksum_accepts_matching_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

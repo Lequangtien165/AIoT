@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from recognize_stream import LatestFrameReader, parse_args, scale_bbox, snapshot_tracks, track_counts
+from recognize_stream import LatestFrameReader, matching_track_for_bbox, parse_args, scale_bbox, snapshot_tracks, track_counts
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -132,6 +132,19 @@ class LatestFrameReaderTests(unittest.TestCase):
     def test_latest_without_frames_returns_none(self):
         reader = LatestFrameReader("rtsp://127.0.0.1:8554/camera", mirror=False, reconnect_delay=1.0)
         self.assertIsNone(reader.latest())
+
+
+class ObservationAssociationTests(unittest.TestCase):
+    def test_matching_track_for_bbox_returns_only_visible_exact_match(self):
+        hidden = type("Track", (), {"track_id": 1, "bbox": (1, 2, 3, 4), "missed_frames": 1})()
+        visible = type("Track", (), {"track_id": 2, "bbox": (1, 2, 3, 4), "missed_frames": 0})()
+
+        self.assertIs(matching_track_for_bbox([hidden, visible], (1, 2, 3, 4)), visible)
+
+    def test_matching_track_for_bbox_does_not_fallback_to_unrelated_track(self):
+        track = type("Track", (), {"track_id": 1, "bbox": (1, 2, 3, 4), "missed_frames": 0})()
+
+        self.assertIsNone(matching_track_for_bbox([track], (5, 6, 7, 8)))
 
 
 if __name__ == "__main__":

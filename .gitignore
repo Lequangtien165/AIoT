@@ -7,6 +7,9 @@ __pycache__/
 *.py[cod]
 database/*.index
 database/metadata.json
+database/*.sqlite3
+database/*.sqlite3-wal
+database/*.sqlite3-shm
 AGENTS.md
 .ignore
 outputs/
