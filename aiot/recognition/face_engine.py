@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 from insightface.app import FaceAnalysis
+from insightface.app.common import Face
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,15 @@ class FaceEmbedding:
 
     bbox: tuple[int, int, int, int]
     embedding: np.ndarray
+
+
+@dataclass(frozen=True)
+class FaceDetection:
+    """One SCRFD detection with the landmarks needed for ArcFace alignment."""
+
+    bbox: tuple[int, int, int, int]
+    confidence: float
+    landmarks: np.ndarray | None
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,7 @@ class FaceEngine:
         with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
             self.app = FaceAnalysis(
                 name="buffalo_l",
+                allowed_modules=["detection", "recognition"],
                 providers=preferred_providers,
             )
 
@@ -72,13 +83,19 @@ class FaceEngine:
             if text.strip()
         )
         self.requested_providers = preferred_providers
-        self.providers = self._effective_providers()
+        self.detector = self.app.models.get("detection")
+        self.recognition_model = self.app.models.get("recognition")
+        if self.detector is None or self.recognition_model is None:
+            raise RuntimeError("InsightFace buffalo_l must provide detection and recognition models.")
+        self.detector_providers = self._model_providers(self.detector)
+        self.recognition_providers = self._model_providers(self.recognition_model)
+        self.providers = list(self.recognition_providers)
         self.provider_status = ProviderStatus(
             requested=list(self.requested_providers),
             effective=list(self.providers),
             warning=self._build_provider_warning(),
             gpu_requested="CUDAExecutionProvider" in self.requested_providers,
-            gpu_active="CUDAExecutionProvider" in self.providers,
+            gpu_active=self._cuda_active_for_all_models(),
         )
 
     def extract_embedding(
@@ -106,103 +123,89 @@ class FaceEngine:
                 f"Could not read image: {image_path}"
             )
 
-        faces = self.extract_faces(image)
+        detections = self.detect_faces(image)
 
-        if len(faces) == 0:
+        if len(detections) == 0:
             raise ValueError(
                 f"No face was found in image: {image_path}"
             )
 
-        if require_single_face and len(faces) != 1:
+        if require_single_face and len(detections) != 1:
             raise ValueError(
-                f"Image {image_path} contains {len(faces)} faces. "
+                f"Image {image_path} contains {len(detections)} faces. "
                 "An enrollment image must contain exactly one face."
             )
 
         # When multiple faces are allowed, select the largest bounding box.
-        face = max(faces, key=lambda item: self._face_area(item.bbox))
+        detection = max(detections, key=lambda item: self._face_area(item.bbox))
+        face = self.embed_detected_face(image, detection)
+        if face is None:
+            raise ValueError(f"Could not generate an embedding for image: {image_path}")
         return face.embedding
 
     def extract_faces(self, image: np.ndarray) -> list[FaceEmbedding]:
-        """Return all faces in a BGR frame with normalized embeddings."""
+        """Compatibility helper that embeds every detected face."""
+        return [embedding for detection in self.detect_faces(image) if (embedding := self.embed_detected_face(image, detection))]
+
+    def detect_faces(self, image: np.ndarray) -> list[FaceDetection]:
+        """Run only SCRFD detection and return frame-local alignment landmarks."""
         if image is None or image.size == 0:
             raise ValueError("Image frame is empty.")
-
-        faces: list[FaceEmbedding] = []
-        for face in self.app.get(image):
-            embedding = np.asarray(face.embedding, dtype="float32").flatten()
-            norm = np.linalg.norm(embedding)
-            if norm == 0:
-                continue
-
-            x1, y1, x2, y2 = (int(value) for value in face.bbox)
-            faces.append(
-                FaceEmbedding(
-                    bbox=(x1, y1, x2, y2),
-                    embedding=(embedding / norm).astype("float32"),
-                )
-            )
-        return faces
-
-    def extract_face_from_bbox(
-        self,
-        image: np.ndarray,
-        bbox: tuple[int, int, int, int],
-        margin: float = 0.20,
-    ) -> FaceEmbedding | None:
-        """Generate an embedding for the face nearest to the supplied bounding box."""
-        if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
-
         height, width = image.shape[:2]
-        x1, y1, x2, y2 = bbox
-        box_width = max(1, x2 - x1)
-        box_height = max(1, y2 - y1)
-        pad_x = int(box_width * margin)
-        pad_y = int(box_height * margin)
-        crop_x1 = max(0, x1 - pad_x)
-        crop_y1 = max(0, y1 - pad_y)
-        crop_x2 = min(width, x2 + pad_x)
-        crop_y2 = min(height, y2 + pad_y)
+        bboxes, landmarks = self.detector.detect(image, max_num=0, metric="default")
+        detections: list[FaceDetection] = []
+        for index, box in enumerate(bboxes):
+            x1 = max(0, int(box[0]))
+            y1 = max(0, int(box[1]))
+            x2 = min(width - 1, int(box[2]))
+            y2 = min(height - 1, int(box[3]))
+            if x1 >= x2 or y1 >= y2:
+                continue
+            keypoints = None
+            if landmarks is not None and index < len(landmarks):
+                candidate = np.asarray(landmarks[index], dtype="float32")
+                if candidate.shape == (5, 2) and np.isfinite(candidate).all():
+                    keypoints = candidate.copy()
+            detections.append(FaceDetection((x1, y1, x2, y2), float(box[4]), keypoints))
+        return detections
 
-        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+    def embed_detected_face(self, image: np.ndarray, detection: FaceDetection) -> FaceEmbedding | None:
+        """Align and embed one SCRFD detection with the buffalo_l ArcFace model."""
+        if image is None or image.size == 0:
+            raise ValueError("Image frame is empty.")
+        if detection.landmarks is None or detection.landmarks.shape != (5, 2):
             return None
-
-        crop = image[crop_y1:crop_y2, crop_x1:crop_x2]
-        faces = self.extract_faces(crop)
-        if not faces:
-            return None
-
-        target_center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-
-        def distance_to_target(face: FaceEmbedding) -> float:
-            fx1, fy1, fx2, fy2 = face.bbox
-            center_x = crop_x1 + (fx1 + fx2) / 2.0
-            center_y = crop_y1 + (fy1 + fy2) / 2.0
-            return float((center_x - target_center[0]) ** 2 + (center_y - target_center[1]) ** 2)
-
-        match = min(faces, key=distance_to_target)
-        fx1, fy1, fx2, fy2 = match.bbox
-        return FaceEmbedding(
-            bbox=(crop_x1 + fx1, crop_y1 + fy1, crop_x1 + fx2, crop_y1 + fy2),
-            embedding=match.embedding,
+        face = Face(
+            bbox=np.asarray(detection.bbox, dtype="float32"),
+            kps=detection.landmarks,
+            det_score=detection.confidence,
         )
+        embedding = np.asarray(self.recognition_model.get(image, face), dtype="float32").flatten()
+        norm = np.linalg.norm(embedding)
+        if norm == 0 or not np.isfinite(norm):
+            return None
+        return FaceEmbedding(detection.bbox, (embedding / norm).astype("float32"))
 
     @staticmethod
     def _face_area(bbox: np.ndarray) -> float:
         x1, y1, x2, y2 = bbox
         return float((x2 - x1) * (y2 - y1))
 
-    def _effective_providers(self) -> list[str]:
-        for model in self.app.models.values():
-            session = getattr(model, "session", None)
-            if session is not None and hasattr(session, "get_providers"):
-                return list(session.get_providers())
+    def _model_providers(self, model: object) -> list[str]:
+        session = getattr(model, "session", None)
+        if session is not None and hasattr(session, "get_providers"):
+            return list(session.get_providers())
         return list(self.requested_providers)
+
+    def _cuda_active_for_all_models(self) -> bool:
+        return all(
+            "CUDAExecutionProvider" in providers
+            for providers in (self.detector_providers, self.recognition_providers)
+        )
 
     def _build_provider_warning(self) -> str | None:
         gpu_requested = "CUDAExecutionProvider" in self.requested_providers
-        gpu_active = "CUDAExecutionProvider" in self.providers
+        gpu_active = self._cuda_active_for_all_models()
         if not gpu_requested:
             return None
         if gpu_active:
