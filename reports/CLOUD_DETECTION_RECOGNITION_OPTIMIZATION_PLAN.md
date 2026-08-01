@@ -1,124 +1,203 @@
-# Cloud Detection and Recognition Optimization Plan
+# InsightFace Detection and Recognition Optimization Plan
 
-## Current Architecture
+## Decision
 
-The project currently has two separate pipelines.
+The production realtime recognition pipeline uses InsightFace `buffalo_l`
+only. MediaPipe remains limited to `app.py`, a lightweight cross-platform
+detection preview and RTSP smoke test. It is not part of realtime recognition.
 
-### Detection Preview
+The first implementation uses one bounded worker and one source frame per
+cycle. SCRFD detects all faces, then ArcFace embeds at most one scheduled
+track. This removes unnecessary embedding work without adding a second worker,
+a frame queue, or stale-frame races.
 
-`app.py` uses MediaPipe BlazeFace for a detection-only preview:
+## Current Problem
 
-```text
-RTSP -> MediaPipe detection -> green bounding boxes -> local preview window
-```
+The previous realtime loop called `FaceAnalysis.get(frame)`. That call runs
+SCRFD detection and every non-detection model for every detected face before
+the tracker can decide which face needs recognition. Tracker scheduling then
+reduced FAISS searches, but did not reduce ArcFace GPU work.
 
-This pipeline does not perform recognition.
-
-### Realtime Recognition
-
-`recognize_stream.py` does not use MediaPipe. It uses InsightFace `buffalo_l` for both face detection and embedding generation:
+## Target Architecture
 
 ```text
 RTSP capture
-  -> retain only the latest frame
-  -> run at the configured recognition FPS, default 6 FPS:
-       InsightFace detects all faces
-       InsightFace generates an embedding for every detected face
-  -> IoU/center-distance tracker assigns track IDs
-  -> FAISS matches identities and the tracker confirms labels
-  -> annotated display output
+  -> latest frame buffer, size 1
+  -> InsightFace SCRFD detects all faces
+  -> FaceTracker updates every visible track
+  -> scheduler chooses at most one eligible track
+  -> InsightFace ArcFace aligns and embeds the selected SCRFD detection
+  -> FAISS IndexFlatIP search
+  -> confirmation, events, MQTT, display, and optional output
 ```
 
-Relevant implementation locations:
+## Invariants
 
-- Latest-frame capture: `recognize_stream.py:164-232`
-- Recognition rate limiting: `recognize_stream.py:53-70`, `recognize_stream.py:287-304`
-- InsightFace detection and embeddings: `recognize_stream.py:307`, `aiot/recognition/face_engine.py:126-145`
-- Tracking: `aiot/tracking/face_tracker.py:95-129`
-- FAISS matching and confirmation: `recognize_stream.py:322-331`, `aiot/tracking/face_tracker.py:152-189`
+- The realtime path does not call `FaceAnalysis.get()`.
+- Every SCRFD detection is supplied to the tracker.
+- ArcFace runs only for scheduler-selected tracks.
+- Default embedding budget is one per cycle.
+- Detection bbox and five SCRFD landmarks used for ArcFace come from the same
+  source frame and same detection.
+- Tracker identity state remains attached to `track_id`, not bbox coordinates.
+- The tracker does not persist landmarks or embeddings between frames.
+- A failed alignment or ArcFace inference is not evidence that a person is
+  unknown. It leaves identity state unchanged and is reported as pipeline work
+  that can be retried.
+- Embeddings and FAISS gallery vectors remain normalized `float32`; inner
+  product remains cosine similarity.
+- Latest-frame behavior remains bounded. Do not add an unbounded queue.
+- `--require-gpu` remains strict: CUDA must be active for both SCRFD and
+  ArcFace.
 
-## Existing Performance Strategy
+## InsightFace API Boundary
 
-- Latest-frame capture discards old frames instead of accumulating processing latency.
-- `--recognition-fps` caps costly inference below source video FPS.
-- Identity state is attached to `track_id`, not bounding-box coordinates.
-- A track must satisfy the minimum age and face-size requirements before recognition.
-- Identity confirmation requires two consecutive recognition results.
-- Confirmed matches are refreshed less often than pending or unknown tracks.
-- Pending tracks have the highest recognition priority, followed by unknown and matched tracks.
-- InsightFace can use CUDA on the Windows cloud laptop, while FAISS runs efficiently on CPU.
-
-## Current Limitation
-
-Tracking does not yet avoid the full embedding cost.
-
-On every scheduled inference frame, this call detects all faces and produces an embedding for every face before recognition scheduling occurs:
+`FaceEngine` owns all InsightFace internal APIs. Callers must not depend on
+model-zoo classes or `FaceAnalysis.get()`.
 
 ```python
-observations = self.engine.extract_faces(stream_frame.frame)
+FaceEngine.detect_faces(frame) -> list[FaceDetection]
+FaceEngine.embed_detected_face(frame, detection) -> FaceEmbedding | None
 ```
 
-The tracker reduces FAISS searches, label changes, and refresh frequency. However, it does not prevent InsightFace from generating embeddings for faces that are not selected for recognition. In addition, `maximum=len(observations)` can select every eligible track in one inference cycle.
+`FaceDetection` contains:
 
-## Optimization Goal
+- integer clipped bbox;
+- SCRFD detection confidence;
+- copied `float32` five-point landmarks with shape `(5, 2)`, when available.
 
-Keep the current responsive, latest-frame architecture while separating detection from embedding work. Detection should update all tracks, while embeddings should be generated only for tracks selected by the recognition scheduler.
+`detect_faces()` calls `app.det_model.detect(frame, max_num=0)` only.
+`embed_detected_face()` creates an InsightFace `Face` with the same bbox and
+landmarks, then calls `app.models["recognition"].get(frame, face)`. The
+recognition model performs ArcFace landmark alignment before ONNX inference.
 
-Target architecture:
+Only `detection` and `recognition` modules are loaded from `buffalo_l`. Age,
+gender, and extra landmark models are excluded because the stream does not use
+them.
+
+## Scheduling Policy
+
+At each `--recognition-fps` cycle:
+
+1. Run SCRFD detection on the latest frame.
+2. Update all tracks.
+3. Build a frame-local mapping from `track_id` to SCRFD detection through
+   `TrackAssignment`, not bbox equality.
+4. Select no more than `--max-embeddings-per-cycle` tracks; default is `1`.
+5. Prioritize `pending`, then `unknown`, then `matched` tracks due for refresh.
+6. ArcFace embed only selected tracks that still have current landmarks.
+7. Search FAISS and apply the existing threshold, confirmation, and
+   label-switch-margin rules.
+
+The existing scheduler tie-breakers (`last_recognition_frame`, then `track_id`)
+give pending tracks fair turns under budget one.
+
+## CLI Contract
 
 ```text
-RTSP capture
-  -> latest-frame buffer of size 1
-  -> detector at a configured cadence
-  -> tracker updates track IDs and bounding boxes
-  -> scheduler selects eligible tracks
-  -> crop/align/embed only selected tracks
-  -> FAISS CPU similarity search
-  -> confirmation, events, and annotated display
+--recognition-fps N
+    SCRFD/tracking/scheduling cycles per second. Default: 6.
+
+--max-embeddings-per-cycle N
+    Maximum selected ArcFace embeddings per cycle. Default: 1.
+
+--det-size N
+    SCRFD input size. Default: 640.
 ```
 
-## Proposed Implementation Direction
+The first implementation does not have an independent detector cadence. Do not
+interpret `--max-embeddings-per-cycle` as a detector face limit: SCRFD always
+sees all faces.
 
-### 1. Separate Detection and Embedding APIs
+## Tracker Association Contract
 
-- Refactor `FaceEngine` so detection and embedding extraction are explicit, independently callable operations.
-- Retain the existing `extract_face_from_bbox()` capability or evolve it into the embedding path for a selected tracked face.
-- Ensure face alignment is retained before ArcFace embedding inference.
+`FaceTracker.update_with_assignments(boxes, frame_id)` returns both tracks and
+one `TrackAssignment(track_id, box_index)` for every visible matched or newly
+created track. The worker resolves the selected track to the detection at that
+index. This guarantees that ArcFace receives the exact current landmarks.
 
-### 2. Preserve a Lightweight Detector Path
+`FaceTracker.update()` remains as a compatibility wrapper for callers that only
+need tracks.
 
-- Evaluate MediaPipe BlazeFace as the detector when cloud CPU capacity and frame rate make it suitable.
-- Evaluate InsightFace SCRFD as the detector when CUDA is available and detection quality is more important.
-- Use one detector per realtime-recognition pipeline; do not run MediaPipe and InsightFace detection on every frame.
+## Metrics
 
-### 3. Limit Embedding Work per Cycle
+Each `RecognitionResult` records:
 
-- Keep the existing scheduler conditions: track age, face size, status priority, and refresh interval.
-- Set an explicit low maximum number of embeddings per cycle, initially one track.
-- Prioritize pending tracks, then unknown tracks, then confirmed tracks that are due for refresh.
-- Do not generate embeddings for tracks that are not selected.
+- `detected_faces`;
+- `embeddings_generated`;
+- `detection_latency_ms`;
+- `embedding_latency_ms`;
+- total cycle latency and track counts.
 
-### 4. Keep Identity Reliability Rules
+`--profile` reports capture/display/recognition rate, embeddings per cycle,
+detector and embedding latency, and visible/stale track counts. MQTT schema is
+unchanged in this phase; metrics remain local profile data.
 
-- Preserve normalized `float32` embeddings and FAISS `IndexFlatIP`, where scores are cosine similarities.
-- Preserve the calibrated recognition threshold requirement.
-- Preserve repeated-result confirmation before exposing a stable identity.
-- Preserve identity-change margin handling to avoid label flapping.
+## Test Plan
 
-### 5. Instrument Before and After
+Unit tests must cover:
 
-- Record capture FPS, display FPS, detector FPS, embedding FPS, and end-to-end recognition latency.
-- Record the number of detected faces, active tracks, and embeddings generated per inference cycle.
-- Benchmark single face, multiple faces, unknown faces, and temporary occlusion scenarios.
-- Compare GPU utilization and memory before and after the separation.
+1. SCRFD detection conversion, clipping, confidence, and landmarks.
+2. ArcFace selected-detection alignment, normalization, dtype, shape, and
+   invalid landmark handling.
+3. No `FaceAnalysis.get()` call in split stream APIs.
+4. One-to-one tracker assignments for new and matched tracks.
+5. All detections update tracker state, while unselected detections do not call
+   ArcFace or FAISS.
+6. Budget one, override budgets, scheduler fairness, and confirmation behavior.
+7. Detection/embedding failures do not create false unknown identities.
+8. Latest-frame behavior, provider diagnostics, and static image enrollment/
+   query compatibility.
 
-## When to Apply This Optimization
+## Real-Model Validation
 
-The current InsightFace-only approach is practical for the Windows RTX 3050 cloud laptop and is suitable for a simple demo. Prioritize this optimization when one or more of the following occurs:
+Run on the Windows CUDA target with the installed `insightface==1.0.1` model:
 
-- Multiple faces cause recognition latency or low display responsiveness.
-- GPU utilization is consistently high at the required recognition rate.
-- The system must support lower-spec cloud hardware.
-- A measured benchmark demonstrates unnecessary embeddings are the bottleneck.
+1. Compare a baseline `FaceAnalysis.get()` embedding with split SCRFD + ArcFace
+   for the same face.
+2. Require cosine similarity `>= 0.99999` for representative images.
+3. Validate one face, unknown face, three faces, motion, and short occlusion.
+4. Verify CUDA is active for both detector and recognition sessions.
 
-Until then, retain the current approach because it is simpler, accurate, and already supports tracking, confirmation, CUDA diagnostics, snapshots, and optional recording.
+Do not lower recognition thresholds to mask an alignment mismatch.
+
+## Benchmark Protocol
+
+Use 1280x720 at 30 FPS, `--det-size 640`, `--recognition-fps 6`, CUDA required,
+30-second warm-up, and at least 120 seconds per scenario.
+
+| Scenario | Required observation |
+| --- | --- |
+| One enrolled face | Stable confirmation and periodic refresh |
+| One unknown face | Valid unknown result without repeat overload |
+| Three faces | All tracks visible; max one embedding per cycle |
+| Motion | Track IDs and selected landmarks remain aligned |
+| Short occlusion | Track TTL and recognition revalidation remain correct |
+
+Record before/after capture FPS, display FPS, p50/p95 cycle latency, detector
+latency, embedding latency, GPU use, VRAM, time-to-first identity, detected
+faces, and embeddings per cycle.
+
+## Acceptance Criteria
+
+- No stream-path use of `FaceAnalysis.get()`.
+- Every cycle detects all visible faces.
+- `embeddings_generated <= max_embeddings_per_cycle`.
+- Default runtime generates at most one ArcFace embedding per cycle.
+- Static enrollment and image recognition continue to work.
+- Existing confirmation, unknown, label-switch, snapshot, MQTT, and display
+  behavior do not regress.
+- Full unit suite passes.
+- Real-model split embeddings meet equivalence target.
+- Multi-face benchmark shows embeddings no longer scale with detected face count
+  per cycle.
+
+## Deferred Work
+
+- Separate detector and recognition workers.
+- Frame ring buffer and immutable recognition jobs.
+- Independent detector cadence.
+- Multiple in-flight ArcFace jobs.
+- GPU FAISS.
+- SORT/DeepSORT for crowded crossings or long occlusion.
+- MQTT performance metrics and schema versioning.
