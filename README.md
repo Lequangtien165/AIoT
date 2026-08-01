@@ -254,6 +254,44 @@ python recognize_stream.py \
 
 On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a clear Windows-only message.
 
+## MQTT Control Plane and Audit Logging
+
+MQTT is optional. Start a Mosquitto-compatible broker, then enable publisher status and control messages:
+
+```powershell
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1
+```
+
+For a broker that requires credentials, keep the password out of shell history by reading it from an environment variable:
+
+Set `AIOT_MQTT_PASSWORD` in the terminal environment first, then run:
+
+```powershell
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+The RTSP publisher emits `system/status` heartbeat messages and subscribes to `control/stream`. A stop command uses this JSON payload:
+
+```json
+{"schema_version":1,"action":"stop","requested_by":"cloud","parameters":{}}
+```
+
+The publisher validates `control/stream` messages and only acts on schema version 1. While the publisher is already running, `stop` is the only command that changes process state; `start` and `restart` are logged but not executed by this MVP runtime.
+
+Enable recognition result publishing:
+
+```powershell
+python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1
+```
+
+The recognition pipeline publishes `recognition/result`, `system/status`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
+
+```powershell
+python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --db-path database/audit_log.sqlite3
+```
+
+The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`. `motion/detected` is reserved for the Raspberry Pi PIR edge client; real GPIO integration and live Mosquitto end-to-end validation remain pending. The web UI described in the architecture report is also outside this MQTT/audit MVP.
+
 ## Troubleshooting
 
 - `Missing local tools`: run `python scripts/setup_tools.py`.
@@ -262,4 +300,4 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 - `Could not open RTSP stream`: start module 1 first, then verify `rtsp://127.0.0.1:8554/camera`.
 - `Could not find video device with name [1. Integrated Camera]`: pass the exact device name without the menu number, for example `--device "Integrated Camera"`.
 - `GPU requested but unavailable, using CPU`: verify the NVIDIA driver, CUDA/cuDNN runtime DLLs, and the ONNX Runtime CUDA session test in the Windows recognition setup section.
-- For RTSP URLs containing credentials, avoid placing the full command in shared shell history or screenshots. Application logs redact passwords.
+- For RTSP URLs or MQTT credentials, avoid placing secrets in shared shell history or screenshots. Application logs redact RTSP passwords, and MQTT passwords should be passed through `--mqtt-password-env`.

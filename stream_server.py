@@ -7,15 +7,20 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from aiot.mqtt import payloads
+from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
+from aiot.mqtt.topics import TOPIC_CONTROL_STREAM, TOPIC_ERROR_RTSP, TOPIC_POLICIES, TOPIC_SYSTEM_STATUS
 from aiot.streaming.stream_platform import PlatformConfig, get_platform_config
 from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
 
 PROJECT_ROOT = Path(__file__).parent
 MEDIA_MTX_CONFIG = PROJECT_ROOT / "config" / "mediamtx.yml"
+CONTROL_STREAM_ACTIONS = {"stop", "start", "restart"}
 
 
 @dataclass(frozen=True)
@@ -42,12 +47,41 @@ def parse_args() -> argparse.Namespace:
         "--video-size", default="1280x720", help="Requested size (default: 1280x720)."
     )
     parser.add_argument("--bitrate", default="2M", help="H.264 bitrate (default: 2M).")
+    parser.add_argument("--mqtt-host", help="MQTT broker host for edge status and control.")
+    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--mqtt-client-id", default="aiot-edge-publisher")
+    parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
+    parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     args = parser.parse_args()
 
     if args.framerate is not None and args.framerate <= 0:
         parser.error("--framerate must be positive.")
+    if args.mqtt_port <= 0 or args.heartbeat_interval <= 0:
+        parser.error("--mqtt-port and --heartbeat-interval must be positive.")
+    if args.mqtt_username:
+        try:
+            password_from_env(args.mqtt_username, args.mqtt_password_env)
+        except ValueError as error:
+            parser.error(str(error))
 
     return args
+
+
+def publish_mqtt(client: MqttClient | None, topic: str, message: dict) -> None:
+    if client is None:
+        return
+    policy = TOPIC_POLICIES[topic]
+    client.publish(topic, message, qos=policy.qos, retain=policy.retain)
+
+
+def validate_control_stream_action(message: dict) -> str | None:
+    if message.get("schema_version") != payloads.SCHEMA_VERSION:
+        return None
+    action = message.get("action")
+    if action not in CONTROL_STREAM_ACTIONS:
+        return None
+    return str(action)
 
 
 def require_tools(config: PlatformConfig) -> bool:
@@ -288,21 +322,100 @@ def main() -> int:
         if args.device is None:
             return 1
 
+    stop_requested = threading.Event()
+    mqtt_client: MqttClient | None = None
+
+    def on_control_message(topic: str, message: dict) -> None:
+        if topic != TOPIC_CONTROL_STREAM:
+            return
+        action = validate_control_stream_action(message)
+        if action is None:
+            print("Ignoring invalid MQTT stream control payload.", file=sys.stderr)
+            return
+        if action == "stop":
+            print("Received MQTT stop command.")
+            stop_requested.set()
+        elif action in {"start", "restart"}:
+            print(f"Received MQTT {action} command, but this process is already running.")
+        else:
+            print(f"Ignoring unsupported MQTT stream action: {action}", file=sys.stderr)
+
+    if args.mqtt_host:
+        try:
+            mqtt_client = MqttClient(
+                host=args.mqtt_host,
+                port=args.mqtt_port,
+                client_id=args.mqtt_client_id,
+                username=args.mqtt_username,
+                password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+                on_message=on_control_message,
+            )
+            mqtt_client.subscribe(TOPIC_CONTROL_STREAM, qos=TOPIC_POLICIES[TOPIC_CONTROL_STREAM].qos)
+            mqtt_client.connect()
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_SYSTEM_STATUS,
+                payloads.system_status(
+                    device_id=args.mqtt_client_id,
+                    component="rtsp-publisher",
+                    state="starting",
+                    message="RTSP publisher is starting.",
+                    metrics={"rtsp_url": RTSP_URL},
+                ),
+            )
+        except MqttUnavailable as error:
+            print(f"[MQTT] {error}", file=sys.stderr)
+            return 1
+
     mediamtx = subprocess.Popen([str(config.mediamtx_path), str(MEDIA_MTX_CONFIG)])
     ffmpeg: subprocess.Popen[bytes] | None = None
+    last_heartbeat = 0.0
 
     try:
         if not wait_for_rtsp_server(mediamtx):
             print("MediaMTX did not start on 127.0.0.1:8554.", file=sys.stderr)
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_ERROR_RTSP,
+                payloads.error_event(
+                    component="rtsp-publisher",
+                    source=RTSP_URL,
+                    message="MediaMTX did not start.",
+                ),
+            )
             return 1
 
         ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
         print(f"Publishing webcam at {RTSP_URL}")
         print("Press Ctrl+C to stop.")
+        publish_mqtt(
+            mqtt_client,
+            TOPIC_SYSTEM_STATUS,
+            payloads.system_status(
+                device_id=args.mqtt_client_id,
+                component="rtsp-publisher",
+                state="running",
+                metrics={
+                    "rtsp_url": RTSP_URL,
+                    "video_size": args.video_size,
+                    "framerate": args.framerate,
+                    "bitrate": args.bitrate,
+                },
+            ),
+        )
 
         while True:
             if mediamtx.poll() is not None:
                 print("MediaMTX stopped unexpectedly.", file=sys.stderr)
+                publish_mqtt(
+                    mqtt_client,
+                    TOPIC_ERROR_RTSP,
+                    payloads.error_event(
+                        component="rtsp-publisher",
+                        source=RTSP_URL,
+                        message="MediaMTX stopped unexpectedly.",
+                    ),
+                )
                 return 1
             if ffmpeg.poll() is not None:
                 print(
@@ -311,14 +424,56 @@ def main() -> int:
                     "failure, or RTSP publish error.",
                     file=sys.stderr,
                 )
+                publish_mqtt(
+                    mqtt_client,
+                    TOPIC_ERROR_RTSP,
+                    payloads.error_event(
+                        component="rtsp-publisher",
+                        source=RTSP_URL,
+                        message="FFmpeg stopped unexpectedly.",
+                        details={"returncode": ffmpeg.returncode},
+                    ),
+                )
                 return ffmpeg.returncode or 1
+            if stop_requested.is_set():
+                print("Stopping RTSP server from MQTT control command.")
+                return 0
+            now = time.monotonic()
+            if now - last_heartbeat >= args.heartbeat_interval:
+                last_heartbeat = now
+                publish_mqtt(
+                    mqtt_client,
+                    TOPIC_SYSTEM_STATUS,
+                    payloads.system_status(
+                        device_id=args.mqtt_client_id,
+                        component="rtsp-publisher",
+                        state="running",
+                        metrics={
+                            "rtsp_url": RTSP_URL,
+                            "mediamtx_pid": mediamtx.pid,
+                            "ffmpeg_pid": ffmpeg.pid,
+                        },
+                    ),
+                )
             time.sleep(0.25)
     except KeyboardInterrupt:
         print("Stopping RTSP server.")
         return 0
     finally:
+        publish_mqtt(
+            mqtt_client,
+            TOPIC_SYSTEM_STATUS,
+            payloads.system_status(
+                device_id=args.mqtt_client_id,
+                component="rtsp-publisher",
+                state="stopping",
+                message="RTSP publisher is stopping.",
+            ),
+        )
         stop_process(ffmpeg)
         stop_process(mediamtx)
+        if mqtt_client is not None:
+            mqtt_client.close()
 
 
 if __name__ == "__main__":
