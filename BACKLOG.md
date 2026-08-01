@@ -2,9 +2,9 @@
 
 ## P0 - Validate the Production Pipeline
 
-- [ ] Run webcam -> RTSP -> MediaPipe -> InsightFace -> FAISS on Windows with a real camera.
+- [x] Run webcam -> RTSP -> MediaPipe -> InsightFace -> FAISS on Windows with a real camera.
 - [ ] Create an enrollment dataset in `dataset/<person>/` with multiple valid images per person.
-- [ ] Run `build_index.py` and verify static-image recognition for every enrolled person.
+- [x] Run `build_index.py` and verify static-image recognition for every enrolled person.
 - [ ] Calibrate `--threshold` using genuine and impostor images; do not retain the `0.45` default if real data indicates otherwise.
 - [ ] Verify snapshot/video output and storage consumption during long-running sessions.
 
