@@ -1,6 +1,6 @@
 # AIoT Face Detection and Recognition
 
-This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS, with NVIDIA CUDA used when the local ONNX Runtime GPU dependencies are available.
+This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS, with NVIDIA CUDA used when the local ONNX Runtime GPU dependencies are available. Linux ARM64 supports RTSP publishing from V4L2 cameras for edge validation; it does not run the recognition pipeline.
 
 ```text
 Module 1: Webcam -> FFmpeg -> MediaMTX -> rtsp://127.0.0.1:8554/camera
@@ -65,6 +65,22 @@ python scripts/setup_tools.py
 ```
 
 On macOS, FFmpeg is managed by Homebrew at `/opt/homebrew/bin/ffmpeg`; the setup script verifies its AVFoundation input and `h264_videotoolbox` encoder before downloading MediaMTX. MediaMTX remains project-local in `tools/`.
+
+### Linux ARM64 Edge Publisher
+
+Use Ubuntu ARM64 with a passed-through UVC/V4L2 camera for edge validation. This phase supports `/dev/videoN` cameras, not Raspberry Pi CSI cameras.
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv ffmpeg v4l-utils
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install certifi
+python scripts/setup_tools.py
+```
+
+The edge publisher only needs `certifi` as a Python dependency. The setup script verifies the system FFmpeg V4L2 input and `libx264` encoder, then downloads and verifies the project-local MediaMTX ARM64 binary.
 
 On either platform, reinstall verified project-local tools with:
 
@@ -135,6 +151,12 @@ On macOS use the AVFoundation video index shown by `--list-devices`:
 python stream_server.py --device 0
 ```
 
+On Linux ARM64, use the V4L2 path shown by `--list-devices`:
+
+```bash
+python stream_server.py --device /dev/video0
+```
+
 The default capture mode is `1280x720` at `30 FPS`, avoiding AVFoundation's unsupported `29.97 FPS` fallback. Override it only when a camera does not support that mode:
 
 ```bash
@@ -145,13 +167,13 @@ python stream_server.py \
   --bitrate 2M
 ```
 
-The raw webcam stream is published at:
+FFmpeg publishes the raw webcam stream locally at:
 
 ```text
 rtsp://127.0.0.1:8554/camera
 ```
 
-MediaMTX listens on the configured RTSP address in `config/mediamtx.yml`. Press `Ctrl+C` to stop FFmpeg, MediaMTX, and release the webcam. On macOS, the publisher uses the M1 hardware encoder (`h264_videotoolbox`).
+MediaMTX listens on the configured RTSP address in `config/mediamtx.yml`, allowing trusted LAN clients to read `rtsp://<PUBLISHER_IP>:8554/camera`. Press `Ctrl+C` to stop FFmpeg, MediaMTX, and release the webcam. On macOS, the publisher uses the M1 hardware encoder (`h264_videotoolbox`).
 
 On the first macOS capture attempt, grant camera access to the terminal application in **System Settings > Privacy & Security > Camera**.
 

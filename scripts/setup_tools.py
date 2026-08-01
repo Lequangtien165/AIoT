@@ -232,6 +232,31 @@ def verify_macos_ffmpeg(ffmpeg_path: Path) -> None:
     print(f"Homebrew FFmpeg verified: {ffmpeg_path}")
 
 
+def verify_linux_ffmpeg(ffmpeg_path: Path) -> None:
+    print("[1/2] System FFmpeg")
+    print("  Checking V4L2 input and libx264 encoder support...")
+    if not ffmpeg_path.is_file():
+        raise RuntimeError("FFmpeg is missing. Install it with: sudo apt install -y ffmpeg")
+
+    devices = subprocess.run(
+        [str(ffmpeg_path), "-hide_banner", "-devices"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    encoders = subprocess.run(
+        [str(ffmpeg_path), "-hide_banner", "-encoders"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if devices.returncode or "v4l2" not in devices.stdout.lower():
+        raise RuntimeError("System FFmpeg does not provide the V4L2 input device.")
+    if encoders.returncode or "libx264" not in encoders.stdout.lower():
+        raise RuntimeError("System FFmpeg does not provide the libx264 encoder.")
+    print(f"System FFmpeg verified: {ffmpeg_path}")
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -241,18 +266,27 @@ def main() -> int:
             "https://github.com/bluenviron/mediamtx/releases/download/"
             f"v{MEDIA_MTX_VERSION}/mediamtx_v{MEDIA_MTX_VERSION}_{media_asset}"
         )
-        platform_name = "Windows AMD64" if config.name == "windows" else "macOS Apple Silicon"
+        platform_name = {
+            "windows": "Windows AMD64",
+            "macos-arm64": "macOS Apple Silicon",
+            "linux-arm64": "Linux ARM64",
+        }[config.name]
         print(f"Platform: {platform_name}")
         print("Install plan:")
         if config.name == "windows":
             print(f"  [1/2] MediaMTX v{MEDIA_MTX_VERSION} -> {TOOLS_DIR / 'mediamtx'}")
             print(f"  [2/2] FFmpeg v{FFMPEG_VERSION} -> {TOOLS_DIR / 'ffmpeg'}")
-        else:
+        elif config.name == "macos-arm64":
             print(f"  [1/2] Verify Homebrew FFmpeg -> {config.ffmpeg_path}")
             print(f"  [2/2] MediaMTX v{MEDIA_MTX_VERSION} -> {TOOLS_DIR / 'mediamtx'}")
+        else:
+            print(f"  [1/2] Verify system FFmpeg -> {config.ffmpeg_path}")
+            print(f"  [2/2] MediaMTX v{MEDIA_MTX_VERSION} -> {TOOLS_DIR / 'mediamtx'}")
 
-        if config.name != "windows":
+        if config.name == "macos-arm64":
             verify_macos_ffmpeg(config.ffmpeg_path)
+        elif config.name == "linux-arm64":
+            verify_linux_ffmpeg(config.ffmpeg_path)
         install_archive(
             "[1/2]" if config.name == "windows" else "[2/2]",
             f"MediaMTX v{MEDIA_MTX_VERSION}",

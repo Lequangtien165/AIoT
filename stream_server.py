@@ -1,4 +1,4 @@
-"""Publish a local webcam as a local-only RTSP stream."""
+"""Publish a local webcam to a MediaMTX RTSP stream."""
 
 from __future__ import annotations
 
@@ -26,9 +26,12 @@ class CameraDevice:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Publish a webcam to a local RTSP stream."
+        description="Publish a webcam to an RTSP stream."
     )
-    parser.add_argument("--device", help="Camera name on Windows or AVFoundation index on macOS.")
+    parser.add_argument(
+        "--device",
+        help="Camera name on Windows, AVFoundation index on macOS, or /dev/videoN on Linux.",
+    )
     parser.add_argument(
         "--list-devices", action="store_true", help="List available video devices and exit."
     )
@@ -61,6 +64,8 @@ def require_tools(config: PlatformConfig) -> bool:
         print(f"  {display_path}", file=sys.stderr)
     if config.name == "macos-arm64" and not config.ffmpeg_path.is_file():
         print("Install FFmpeg with: brew install ffmpeg", file=sys.stderr)
+    elif config.name == "linux-arm64" and not config.ffmpeg_path.is_file():
+        print("Install FFmpeg and V4L2 tools with: sudo apt install -y ffmpeg v4l-utils", file=sys.stderr)
     print("Run: python scripts/setup_tools.py", file=sys.stderr)
     return False
 
@@ -85,7 +90,37 @@ def parse_macos_devices(output: str) -> list[CameraDevice]:
     return devices
 
 
+def parse_linux_devices(output: str) -> list[CameraDevice]:
+    devices = []
+    display_name = "V4L2 camera"
+    for line in output.splitlines():
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            display_name = line.strip().rstrip(":")
+            continue
+        device_path = line.strip()
+        if device_path.startswith("/dev/video"):
+            devices.append(CameraDevice(f"{display_name} ({device_path})", device_path))
+    return devices
+
+
 def get_video_devices(config: PlatformConfig) -> tuple[list[CameraDevice], int, str]:
+    if config.name == "linux-arm64":
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--list-devices"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError:
+            return [], 1, "v4l2-ctl was not found. Install it with: sudo apt install -y v4l-utils"
+        output = result.stdout or ""
+        devices = parse_linux_devices(output)
+        if devices:
+            return devices, 0, output
+        return [], result.returncode or 1, output
+
     command = [str(config.ffmpeg_path), "-hide_banner", "-f", config.capture_format]
     if config.name == "windows":
         command.extend(["-list_devices", "true", "-i", "dummy"])
@@ -181,7 +216,7 @@ def build_ffmpeg_command(args: argparse.Namespace, config: PlatformConfig) -> li
             config.video_encoder,
         ]
     )
-    if config.name == "windows":
+    if config.name in {"windows", "linux-arm64"}:
         command.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
     else:
         command.extend(["-realtime", "true", "-prio_speed", "true", "-bf", "0"])
