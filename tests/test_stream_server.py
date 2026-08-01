@@ -13,6 +13,7 @@ from stream_server import (
     parse_args,
     parse_linux_devices,
     parse_macos_devices,
+    validate_control_stream_action,
 )
 
 
@@ -23,6 +24,51 @@ class FfmpegCommandTests(unittest.TestCase):
 
         self.assertEqual(args.video_size, "1280x720")
         self.assertEqual(args.framerate, 30)
+
+    @patch(
+        "sys.argv",
+        [
+            "stream_server.py",
+            "--device",
+            "Camera A",
+            "--mqtt-host",
+            "127.0.0.1",
+            "--mqtt-port",
+            "1884",
+            "--mqtt-username",
+            "edge",
+            "--mqtt-password-env",
+            "AIOT_MQTT_PASSWORD",
+            "--heartbeat-interval",
+            "2",
+        ],
+    )
+    @patch.dict("os.environ", {"AIOT_MQTT_PASSWORD": "secret"})
+    def test_parse_args_supports_mqtt_flags(self):
+        args = parse_args()
+
+        self.assertEqual(args.mqtt_host, "127.0.0.1")
+        self.assertEqual(args.mqtt_port, 1884)
+        self.assertEqual(args.mqtt_username, "edge")
+        self.assertEqual(args.mqtt_password_env, "AIOT_MQTT_PASSWORD")
+        self.assertEqual(args.heartbeat_interval, 2.0)
+
+    @patch("sys.argv", ["stream_server.py", "--mqtt-username", "edge"])
+    @patch.dict("os.environ", {}, clear=True)
+    def test_mqtt_username_requires_password_env(self):
+        with self.assertRaises(SystemExit):
+            parse_args()
+
+    def test_control_stream_accepts_supported_schema_v1_actions(self):
+        self.assertEqual(
+            validate_control_stream_action({"schema_version": 1, "action": "stop"}),
+            "stop",
+        )
+
+    def test_control_stream_rejects_malformed_or_unsupported_payloads(self):
+        self.assertIsNone(validate_control_stream_action({"schema_version": 2, "action": "stop"}))
+        self.assertIsNone(validate_control_stream_action({"schema_version": 1, "action": "delete"}))
+        self.assertIsNone(validate_control_stream_action({"action": "stop"}))
 
     def test_command_preserves_capture_rate_without_frame_duplication(self):
         args = argparse.Namespace(

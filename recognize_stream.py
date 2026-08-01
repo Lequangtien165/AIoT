@@ -7,11 +7,15 @@ import platform
 import sys
 import threading
 import time
+from typing import Any
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
+from aiot.mqtt import payloads
+from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
+from aiot.mqtt.topics import TOPIC_ERROR_PIPELINE, TOPIC_POLICIES, TOPIC_RECOGNITION_RESULT, TOPIC_SYSTEM_STATUS
 from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
 
@@ -68,6 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", action="store_true", help="Print capture, display, and recognition profiling.")
     parser.add_argument("--require-gpu", action="store_true", help="Exit if CUDAExecutionProvider is not active.")
     parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument("--mqtt-host", help="MQTT broker host for recognition/result events.")
+    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--mqtt-client-id", default="aiot-recognition")
+    parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
+    parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -80,12 +89,27 @@ def parse_args() -> argparse.Namespace:
         or args.matched_recognition_interval_frames <= 0
     ):
         parser.error("reconnect and track values must be greater than 0.")
+    if args.mqtt_username:
+        try:
+            password_from_env(args.mqtt_username, args.mqtt_password_env)
+        except ValueError as error:
+            parser.error(str(error))
     return args
 
 
+def mqtt_policy(topic: str) -> tuple[int, bool]:
+    policy = TOPIC_POLICIES[topic]
+    return policy.qos, policy.retain
+
+
+def publish_mqtt(client: MqttClient | None, topic: str, payload: dict[str, Any]) -> None:
+    if client is None:
+        return
+    qos, retain = mqtt_policy(topic)
+    client.publish(topic, payload, qos=qos, retain=retain)
+
+
 def scale_bbox(bbox: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
-    if scale == 1.0:
-        return bbox
     x1, y1, x2, y2 = bbox
     return (
         int(x1 * scale),
@@ -144,6 +168,30 @@ def log_event(event, snapshot_path) -> None:
     if snapshot_path is not None:
         message += f" snapshot={snapshot_path}"
     print(f"[{timestamp}] {message}")
+
+
+def event_payload(event, snapshot_path: str | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "kind": event.kind,
+        "track_id": event.track_id,
+        "label": getattr(event, "label", None),
+        "score": getattr(event, "score", None),
+        "previous_label": getattr(event, "previous_label", None),
+    }
+    if snapshot_path is not None:
+        data["snapshot_path"] = snapshot_path
+    return data
+
+
+def track_payload(track: DisplayTrack) -> dict[str, Any]:
+    return {
+        "track_id": track.track_id,
+        "bbox": list(track.bbox),
+        "label": track.label,
+        "score": track.score,
+        "status": track.status,
+        "missed_frames": track.missed_frames,
+    }
 
 
 def snapshot_tracks(tracks: list[object]) -> list[DisplayTrack]:
@@ -248,6 +296,7 @@ class RecognitionWorker:
         recognition_fps: float,
         top_k: int,
         threshold: float,
+        on_pipeline_error=None,
     ) -> None:
         self.reader = reader
         self.engine = engine
@@ -256,6 +305,7 @@ class RecognitionWorker:
         self.period = 1.0 / recognition_fps
         self.top_k = top_k
         self.threshold = threshold
+        self.on_pipeline_error = on_pipeline_error
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="RecognitionWorker", daemon=True)
@@ -339,6 +389,8 @@ class RecognitionWorker:
                 active_tracks, visible_tracks, stale_tracks = track_counts(tracks, tracks_to_display)
             except Exception as error:
                 print(f"[WARNING] Could not run InsightFace on frame {stream_frame.frame_id}: {error}", file=sys.stderr)
+                if self.on_pipeline_error is not None:
+                    self.on_pipeline_error(stream_frame.frame_id, error)
                 tracks_to_display = snapshot_tracks(list(self.tracker.tracks.values()))
                 active_tracks, visible_tracks, stale_tracks = track_counts(list(self.tracker.tracks.values()), tracks_to_display)
 
@@ -414,6 +466,31 @@ def main() -> int:
     from aiot.streaming.stream_output import StreamOutput
     from aiot.tracking.face_tracker import FaceTracker
 
+    mqtt_client: MqttClient | None = None
+    if args.mqtt_host:
+        try:
+            mqtt_client = MqttClient(
+                host=args.mqtt_host,
+                port=args.mqtt_port,
+                client_id=args.mqtt_client_id,
+                username=args.mqtt_username,
+                password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+            )
+            mqtt_client.connect()
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_SYSTEM_STATUS,
+                payloads.system_status(
+                    device_id=args.mqtt_client_id,
+                    component="recognition",
+                    state="starting",
+                    message="Recognition pipeline is starting.",
+                ),
+            )
+        except MqttUnavailable as error:
+            print(f"[MQTT] {error}", file=sys.stderr)
+            return 1
+
     engine = FaceEngine(det_size=args.det_size)
     recognizer = FaceRecognizer()
     tracker = FaceTracker(
@@ -442,6 +519,18 @@ def main() -> int:
 
     output = StreamOutput(args.record_video, args.snapshot_dir)
     reader = LatestFrameReader(args.source, mirror=not args.no_mirror, reconnect_delay=args.reconnect_delay)
+    def on_pipeline_error(frame_id: int, error: Exception) -> None:
+        publish_mqtt(
+            mqtt_client,
+            TOPIC_ERROR_PIPELINE,
+            payloads.error_event(
+                component="recognition",
+                source=args.source,
+                message=str(error),
+                details={"frame_id": frame_id},
+            ),
+        )
+
     worker = RecognitionWorker(
         reader=reader,
         engine=engine,
@@ -450,6 +539,7 @@ def main() -> int:
         recognition_fps=args.recognition_fps,
         top_k=args.top_k,
         threshold=args.threshold,
+        on_pipeline_error=on_pipeline_error,
     )
 
     display_frames = 0
@@ -489,11 +579,25 @@ def main() -> int:
                 draw_tracks(display_frame, result.tracks, display_scale, stale)
                 if result.result_id != consumed_result_id:
                     consumed_result_id = result.result_id
+                    event_payloads = []
                     for event in result.events:
                         snapshot = None
                         if event.kind in {"identity_confirmed", "identity_changed"}:
                             snapshot = output.save_snapshot(stream_frame.frame, event.track_id, event.label or "unknown", event.score or 0.0)
                         log_event(event, snapshot)
+                        event_payloads.append(event_payload(event, str(snapshot) if snapshot is not None else None))
+                    publish_mqtt(
+                        mqtt_client,
+                        TOPIC_RECOGNITION_RESULT,
+                        payloads.recognition_result(
+                            source=args.source,
+                            frame_id=result.frame_id,
+                            result_id=result.result_id,
+                            latency_ms=result.latency_ms,
+                            tracks=[track_payload(track) for track in result.tracks],
+                            events=event_payloads,
+                        ),
+                    )
 
             output.write_frame(display_frame, stream_frame.source_fps)
             cv2.imshow(WINDOW_TITLE, display_frame)
@@ -519,9 +623,21 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        publish_mqtt(
+            mqtt_client,
+            TOPIC_SYSTEM_STATUS,
+            payloads.system_status(
+                device_id=args.mqtt_client_id,
+                component="recognition",
+                state="stopping",
+                message="Recognition pipeline is stopping.",
+            ),
+        )
         worker.stop()
         reader.stop()
         output.close()
+        if mqtt_client is not None:
+            mqtt_client.close()
         cv2.destroyAllWindows()
     return 0
 
