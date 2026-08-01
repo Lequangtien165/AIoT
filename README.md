@@ -232,6 +232,34 @@ python recognize_stream.py \
 
 On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a clear Windows-only message.
 
+## MQTT Control Plane and Audit Logging
+
+MQTT is optional. Start a Mosquitto-compatible broker, then enable publisher status and control messages:
+
+```powershell
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1
+```
+
+The RTSP publisher emits `system/status` heartbeat messages and subscribes to `control/stream`. A stop command uses this JSON payload:
+
+```json
+{"schema_version":1,"action":"stop","requested_by":"cloud","parameters":{}}
+```
+
+Enable recognition result publishing:
+
+```powershell
+python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1
+```
+
+The recognition pipeline publishes `recognition/result`, `system/status`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
+
+```powershell
+python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --db-path database/audit_log.sqlite3
+```
+
+The audit logger subscribes to `recognition/result`, `motion/detected`, and `error/#`. `motion/detected` is reserved for the Raspberry Pi PIR edge client; GPIO integration still needs validation on the Pi.
+
 ## Troubleshooting
 
 - `Missing local tools`: run `python scripts/setup_tools.py`.
