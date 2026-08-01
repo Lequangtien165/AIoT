@@ -44,51 +44,72 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> int:
-    args = parse_args()
+def open_camera(source: str):
+    camera = open_capture(source)
+    if camera.isOpened():
+        return camera
+    camera.release()
+    return None
+
+
+def wait_for_reconnect(source: str, reconnecting: bool, message: str, delay: float) -> tuple[bool, bool]:
+    if not reconnecting:
+        print(f"{message}: {display_source(source)}. Retrying.", file=sys.stderr)
+    return True, should_exit(delay)
+
+
+def render_frame(frame, detector: FaceDetector) -> bool:
+    frame = cv2.flip(frame, 1)
+    detections = detector.detect(frame, time.monotonic_ns() // 1_000_000)
+    draw_detections(frame, detections)
+    cv2.imshow(WINDOW_TITLE, frame)
+    return cv2.waitKey(1) & 0xFF in (27, ord("q"))
+
+
+def run_preview(source: str, reconnect_delay: float, detector: FaceDetector) -> None:
     camera = None
     reconnecting = False
     try:
-        with FaceDetector(args.confidence) as detector:
-            while True:
+        while True:
+            if camera is None:
+                camera = open_camera(source)
                 if camera is None:
-                    camera = open_capture(args.source)
-                    if not camera.isOpened():
-                        camera.release()
-                        camera = None
-                        if not reconnecting:
-                            print(f"Could not open RTSP stream: {display_source(args.source)}. Retrying.", file=sys.stderr)
-                        reconnecting = True
-                        if should_exit(args.reconnect_delay):
-                            break
-                        continue
-                    reconnecting = False
-
-                success, frame = camera.read()
-                if not success:
-                    camera.release()
-                    camera = None
-                    if not reconnecting:
-                        print(f"Lost RTSP stream: {display_source(args.source)}. Retrying.", file=sys.stderr)
-                    reconnecting = True
-                    if should_exit(args.reconnect_delay):
-                        break
+                    reconnecting, should_stop = wait_for_reconnect(
+                        source, reconnecting, "Could not open RTSP stream", reconnect_delay
+                    )
+                    if should_stop:
+                        return
                     continue
+                reconnecting = False
 
-                frame = cv2.flip(frame, 1)
-                detections = detector.detect(frame, time.monotonic_ns() // 1_000_000)
-                draw_detections(frame, detections)
-                cv2.imshow(WINDOW_TITLE, frame)
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
-                    break
+            success, frame = camera.read()
+            if not success:
+                camera.release()
+                camera = None
+                reconnecting, should_stop = wait_for_reconnect(
+                    source, reconnecting, "Lost RTSP stream", reconnect_delay
+                )
+                if should_stop:
+                    return
+                continue
+            if render_frame(frame, detector):
+                return
     except KeyboardInterrupt:
-        return 0
+        return
+    finally:
+        if camera is not None:
+            camera.release()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        with FaceDetector(args.confidence) as detector:
+            run_preview(args.source, args.reconnect_delay, detector)
     except (FileNotFoundError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     finally:
-        if camera is not None:
-            camera.release()
         cv2.destroyAllWindows()
     return 0
 
