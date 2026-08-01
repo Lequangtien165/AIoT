@@ -61,6 +61,14 @@ class TrackEvent:
     score: float | None
 
 
+@dataclass(frozen=True)
+class TrackAssignment:
+    """A visible track matched to one detection index in the current frame."""
+
+    track_id: int
+    box_index: int
+
+
 class FaceTracker:
     """Assign IDs by IoU and cache labels by ID rather than bounding box coordinates."""
 
@@ -93,6 +101,14 @@ class FaceTracker:
         self._next_track_id = 1
 
     def update(self, boxes: list[BBox], frame_number: int) -> list[Track]:
+        tracks, _ = self.update_with_assignments(boxes, frame_number)
+        return tracks
+
+    def update_with_assignments(
+        self,
+        boxes: list[BBox],
+        frame_number: int,
+    ) -> tuple[list[Track], list[TrackAssignment]]:
         candidates = sorted(
             (
                 (self._match_score(track.bbox, box), track_id, box_index)
@@ -103,6 +119,7 @@ class FaceTracker:
         )
         matched_tracks: set[int] = set()
         matched_boxes: set[int] = set()
+        assignments: list[TrackAssignment] = []
         for score, track_id, box_index in candidates:
             if score <= 0 or track_id in matched_tracks or box_index in matched_boxes:
                 continue
@@ -113,6 +130,7 @@ class FaceTracker:
             track.missed_frames = 0
             matched_tracks.add(track_id)
             matched_boxes.add(box_index)
+            assignments.append(TrackAssignment(track_id, box_index))
 
         expired_track_ids: list[int] = []
         for track_id, track in self.tracks.items():
@@ -128,8 +146,9 @@ class FaceTracker:
                 track = Track(self._next_track_id, box, frame_number)
                 self.tracks[track.track_id] = track
                 self._next_track_id += 1
+                assignments.append(TrackAssignment(track.track_id, box_index))
 
-        return list(self.tracks.values())
+        return list(self.tracks.values()), assignments
 
     def select_for_recognition(self, frame_number: int, maximum: int = 1) -> list[Track]:
         eligible = [

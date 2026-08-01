@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import patch
 
-from recognize_stream import LatestFrameReader, matching_track_for_bbox, parse_args, scale_bbox, snapshot_tracks, track_counts
+import numpy as np
+
+from aiot.recognition.face_engine import FaceDetection, FaceEmbedding
+from aiot.tracking.face_tracker import TrackAssignment
+from recognize_stream import LatestFrameReader, RecognitionWorker, StreamFrame, parse_args, scale_bbox, snapshot_tracks, track_counts
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -24,6 +28,7 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.profile)
         self.assertTrue(args.require_gpu)
         self.assertEqual(args.det_size, 512)
+        self.assertEqual(args.max_embeddings_per_cycle, 1)
 
     @patch(
         "sys.argv",
@@ -134,17 +139,62 @@ class LatestFrameReaderTests(unittest.TestCase):
         self.assertIsNone(reader.latest())
 
 
-class ObservationAssociationTests(unittest.TestCase):
-    def test_matching_track_for_bbox_returns_only_visible_exact_match(self):
-        hidden = type("Track", (), {"track_id": 1, "bbox": (1, 2, 3, 4), "missed_frames": 1})()
-        visible = type("Track", (), {"track_id": 2, "bbox": (1, 2, 3, 4), "missed_frames": 0})()
+class SplitRecognitionWorkerTests(unittest.TestCase):
+    def test_worker_embeds_only_selected_track_with_default_budget(self):
+        first = type("Track", (), {"track_id": 1, "bbox": (0, 0, 100, 100), "label": None, "score": None, "status": "pending", "missed_frames": 0})()
+        second = type("Track", (), {"track_id": 2, "bbox": (200, 0, 300, 100), "label": None, "score": None, "status": "pending", "missed_frames": 0})()
+        landmarks = np.array([[10, 10], [40, 10], [25, 25], [12, 40], [38, 40]], dtype="float32")
+        detections = [
+            FaceDetection(first.bbox, 0.9, landmarks),
+            FaceDetection(second.bbox, 0.9, landmarks),
+        ]
 
-        self.assertIs(matching_track_for_bbox([hidden, visible], (1, 2, 3, 4)), visible)
+        class Engine:
+            def __init__(self):
+                self.embedded = []
 
-    def test_matching_track_for_bbox_does_not_fallback_to_unrelated_track(self):
-        track = type("Track", (), {"track_id": 1, "bbox": (1, 2, 3, 4), "missed_frames": 0})()
+            def detect_faces(self, _frame):
+                return detections
 
-        self.assertIsNone(matching_track_for_bbox([track], (5, 6, 7, 8)))
+            def embed_detected_face(self, _frame, detection):
+                self.embedded.append(detection)
+                return FaceEmbedding(detection.bbox, np.array([1.0, 0.0], dtype="float32"))
+
+        class Tracker:
+            def update_with_assignments(self, boxes, _frame_id):
+                self.boxes = boxes
+                return [first, second], [TrackAssignment(1, 0), TrackAssignment(2, 1)]
+
+            def select_for_recognition(self, _frame_id, maximum):
+                self.maximum = maximum
+                return [first][:maximum]
+
+            def apply_recognition(self, *_args):
+                return None
+
+        class Recognizer:
+            def __init__(self):
+                self.calls = 0
+
+            def search(self, _embedding, _top_k):
+                self.calls += 1
+                return [("Alice", 0.9)]
+
+        engine = Engine()
+        tracker = Tracker()
+        recognizer = Recognizer()
+        worker = RecognitionWorker(None, engine, recognizer, tracker, 6.0, 1, 5, 0.45)
+        frame = StreamFrame(1, np.zeros((320, 320, 3), dtype="uint8"), 0.0, 30.0)
+
+        outcome = worker._process_frame(frame)
+
+        self.assertEqual(tracker.boxes, [item.bbox for item in detections])
+        self.assertEqual(tracker.maximum, 1)
+        self.assertEqual(len(engine.embedded), 1)
+        self.assertIs(engine.embedded[0], detections[0])
+        self.assertEqual(recognizer.calls, 1)
+        self.assertEqual(outcome[3], 2)
+        self.assertEqual(outcome[4], 1)
 
 
 if __name__ == "__main__":

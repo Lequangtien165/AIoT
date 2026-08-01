@@ -40,4 +40,5 @@
 - A complete enrollment dataset for real users has not been created.
 - The recognition threshold has not been calibrated beyond the default `0.45`.
 - FPS, recognition latency, GPU/CPU/RAM usage, multiple-face behavior, and sustained runtime have not been benchmarked.
+- The realtime pipeline now uses InsightFace SCRFD to track all faces and budgets ArcFace embeddings to selected tracks; validate detector latency, embedding latency, embeddings per cycle, and multi-face fairness against the optimization plan.
 - Long-running RTSP disconnection/reconnection, snapshot/video storage usage, and VRAM stability have not been tested.
