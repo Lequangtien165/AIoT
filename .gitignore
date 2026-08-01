@@ -10,3 +10,4 @@ database/metadata.json
 AGENTS.md
 .ignore
 outputs/
+.DS_Store
