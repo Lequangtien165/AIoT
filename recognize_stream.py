@@ -89,9 +89,11 @@ class CloudEdgeSession:
                 self.session_id = payload["stream_session_id"]
                 self.last_presence = 0.0
                 self.capture_enabled.set()
+                print(f"[SESSION] edge={self.device_id} state=streaming session={self.session_id}")
             elif payload.get("state") in {"monitoring", "stopping", "error"}:
                 self.session_id = None
                 self.capture_enabled.clear()
+                print(f"[SESSION] edge={self.device_id} state={payload.get('state')}; capture disabled")
 
     def presence_due(self, detected_faces: int, interval: float) -> str | None:
         if detected_faces < 1:
@@ -345,16 +347,23 @@ class LatestFrameReader:
         camera = None
         frame_id = 0
         reconnecting = False
+        capture_active = False
         try:
             while not self._stop_event.is_set():
                 if not self._capture_enabled.is_set():
                     if camera is not None:
                         camera.release()
                         camera = None
+                    if capture_active:
+                        print("[RTSP] capture released; waiting for edge stream")
+                        capture_active = False
                     with self._lock:
                         self._latest = None
                     self._capture_enabled.wait(0.1)
                     continue
+                if not capture_active:
+                    print("[RTSP] capture enabled; waiting for edge RTSP stream")
+                    capture_active = True
                 if camera is None:
                     camera = open_capture(self.source)
                     if not camera.isOpened():
@@ -665,6 +674,7 @@ def render_recognition_result(
                     face_count=result.detected_faces,
                 ),
             )
+            print(f"[MQTT] face_presence published session={session_id} faces={result.detected_faces}")
     return result.result_id
 
 
