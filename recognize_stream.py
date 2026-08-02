@@ -527,6 +527,65 @@ def print_profile(
     return capture_frames, recognition_frames, display_frames, now
 
 
+def poll_exit() -> bool:
+    return cv2.waitKey(1) & 0xFF in (27, ord("q"))
+
+
+def render_recognition_result(
+    args,
+    result: RecognitionResult | None,
+    source_frame: np.ndarray,
+    display_frame: np.ndarray,
+    display_scale: float,
+    output,
+    mqtt_client,
+    consumed_result_id: int,
+) -> int:
+    if result is None:
+        return consumed_result_id
+    stale = time.monotonic() - result.timestamp > max(0.5, 2.0 / args.recognition_fps)
+    draw_tracks(display_frame, result.tracks, display_scale, stale)
+    if result.result_id == consumed_result_id:
+        return consumed_result_id
+    event_payloads = handle_result_events(result, source_frame, output)
+    publish_mqtt(
+        mqtt_client,
+        TOPIC_RECOGNITION_RESULT,
+        payloads.recognition_result(
+            source=args.source,
+            frame_id=result.frame_id,
+            result_id=result.result_id,
+            latency_ms=result.latency_ms,
+            tracks=[track_payload(track) for track in result.tracks],
+            events=event_payloads,
+        ),
+    )
+    return result.result_id
+
+
+def update_profile(
+    args,
+    reader: LatestFrameReader,
+    worker: RecognitionWorker,
+    display_frames: int,
+    last_capture_frames: int,
+    last_recognition_frames: int,
+    last_display_frames: int,
+    last_profile_time: float,
+) -> tuple[int, int, int, float]:
+    if not args.profile or time.monotonic() - last_profile_time < 2.0:
+        return last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time
+    return print_profile(
+        reader,
+        worker,
+        display_frames,
+        last_capture_frames,
+        last_recognition_frames,
+        last_display_frames,
+        last_profile_time,
+    )
+
+
 def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker, output, mqtt_client) -> None:
     display_frames = 0
     consumed_result_id = 0
@@ -539,14 +598,14 @@ def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker,
     while True:
         stream_frame = reader.latest()
         if stream_frame is None:
-            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            if poll_exit():
                 return
             continue
 
         result = worker.latest_result()
         result_id = result.result_id if result is not None else 0
         if stream_frame.frame_id == last_rendered_frame_id and result_id == last_rendered_result_id:
-            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            if poll_exit():
                 return
             continue
         last_rendered_frame_id = stream_frame.frame_id
@@ -554,33 +613,30 @@ def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker,
         display_frame, display_scale = resize_for_display(stream_frame.frame, 1280)
         if display_frame is stream_frame.frame:
             display_frame = display_frame.copy()
-        if result is not None:
-            stale = time.monotonic() - result.timestamp > max(0.5, 2.0 / args.recognition_fps)
-            draw_tracks(display_frame, result.tracks, display_scale, stale)
-            if result.result_id != consumed_result_id:
-                consumed_result_id = result.result_id
-                event_payloads = handle_result_events(result, stream_frame.frame, output)
-                publish_mqtt(
-                    mqtt_client,
-                    TOPIC_RECOGNITION_RESULT,
-                    payloads.recognition_result(
-                        source=args.source,
-                        frame_id=result.frame_id,
-                        result_id=result.result_id,
-                        latency_ms=result.latency_ms,
-                        tracks=[track_payload(track) for track in result.tracks],
-                        events=event_payloads,
-                    ),
-                )
+        consumed_result_id = render_recognition_result(
+            args,
+            result,
+            stream_frame.frame,
+            display_frame,
+            display_scale,
+            output,
+            mqtt_client,
+            consumed_result_id,
+        )
         output.write_frame(display_frame, stream_frame.source_fps)
         cv2.imshow(WINDOW_TITLE, display_frame)
         display_frames += 1
-        if args.profile and time.monotonic() - last_profile_time >= 2.0:
-            last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = print_profile(
-                reader, worker, display_frames, last_capture_frames, last_recognition_frames,
-                last_display_frames, last_profile_time,
-            )
-        if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+        last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = update_profile(
+            args,
+            reader,
+            worker,
+            display_frames,
+            last_capture_frames,
+            last_recognition_frames,
+            last_display_frames,
+            last_profile_time,
+        )
+        if poll_exit():
             return
 
 
