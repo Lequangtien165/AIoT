@@ -13,8 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
-from aiot.mqtt.topics import TOPIC_CONTROL_STREAM, TOPIC_ERROR_RTSP, TOPIC_POLICIES, TOPIC_SYSTEM_STATUS
+from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, MqttUnavailable, password_from_env
+from aiot.mqtt.topics import (
+    TOPIC_CONTROL_STREAM,
+    control_stream_topic,
+    error_rtsp_topic,
+    system_status_topic,
+    topic_policy,
+)
 from aiot.streaming.stream_platform import PlatformConfig, get_platform_config
 from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
 
@@ -71,12 +77,17 @@ def parse_args() -> argparse.Namespace:
 def publish_mqtt(client: MqttClient | None, topic: str, message: dict) -> None:
     if client is None:
         return
-    policy = TOPIC_POLICIES[topic]
-    client.publish(topic, message, qos=policy.qos, retain=policy.retain)
+    policy = topic_policy(topic)
+    try:
+        client.publish(topic, message, qos=policy.qos, retain=policy.retain)
+    except MqttPublishError as error:
+        print(f"[MQTT] {error}", file=sys.stderr)
 
 
-def validate_control_stream_action(message: dict) -> str | None:
+def validate_control_stream_action(message: dict, device_id: str) -> str | None:
     if message.get("schema_version") != payloads.SCHEMA_VERSION:
+        return None
+    if message.get("target_device_id") != device_id:
         return None
     action = message.get("action")
     if action not in CONTROL_STREAM_ACTIONS:
@@ -315,10 +326,10 @@ def resolve_device(args: argparse.Namespace, config: PlatformConfig) -> int | No
     return None if args.device is not None else 1
 
 
-def handle_control_message(stop_requested: threading.Event, topic: str, message: dict) -> None:
-    if topic != TOPIC_CONTROL_STREAM:
+def handle_control_message(stop_requested: threading.Event, device_id: str, topic: str, message: dict) -> None:
+    if topic != control_stream_topic(device_id):
         return
-    action = validate_control_stream_action(message)
+    action = validate_control_stream_action(message, device_id)
     if action is None:
         print("Ignoring invalid MQTT stream control payload.", file=sys.stderr)
     elif action == "stop":
@@ -339,13 +350,15 @@ def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> M
         client_id=args.mqtt_client_id,
         username=args.mqtt_username,
         password=password_from_env(args.mqtt_username, args.mqtt_password_env),
-        on_message=lambda topic, message: handle_control_message(stop_requested, topic, message),
+        on_message=lambda topic, message: handle_control_message(
+            stop_requested, args.mqtt_client_id, topic, message
+        ),
     )
-    client.subscribe(TOPIC_CONTROL_STREAM, qos=TOPIC_POLICIES[TOPIC_CONTROL_STREAM].qos)
+    client.subscribe(control_stream_topic(args.mqtt_client_id), qos=topic_policy(TOPIC_CONTROL_STREAM).qos)
     client.connect()
     publish_mqtt(
         client,
-        TOPIC_SYSTEM_STATUS,
+        system_status_topic(args.mqtt_client_id),
         payloads.system_status(
             device_id=args.mqtt_client_id,
             component="rtsp-publisher",
@@ -370,7 +383,7 @@ def monitor_publisher(
             print("MediaMTX stopped unexpectedly.", file=sys.stderr)
             publish_mqtt(
                 mqtt_client,
-                TOPIC_ERROR_RTSP,
+                error_rtsp_topic(args.mqtt_client_id),
                 payloads.error_event(
                     component="rtsp-publisher",
                     source=RTSP_URL,
@@ -387,7 +400,7 @@ def monitor_publisher(
             )
             publish_mqtt(
                 mqtt_client,
-                TOPIC_ERROR_RTSP,
+                error_rtsp_topic(args.mqtt_client_id),
                 payloads.error_event(
                     component="rtsp-publisher",
                     source=RTSP_URL,
@@ -404,7 +417,7 @@ def monitor_publisher(
             last_heartbeat = now
             publish_mqtt(
                 mqtt_client,
-                TOPIC_SYSTEM_STATUS,
+                system_status_topic(args.mqtt_client_id),
                 payloads.system_status(
                     device_id=args.mqtt_client_id,
                     component="rtsp-publisher",
@@ -435,7 +448,7 @@ def main() -> int:
     stop_requested = threading.Event()
     try:
         mqtt_client = connect_mqtt(args, stop_requested)
-    except MqttUnavailable as error:
+    except (MqttUnavailable, MqttConnectionError) as error:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1
 
@@ -448,7 +461,7 @@ def main() -> int:
             print("MediaMTX did not start on 127.0.0.1:8554.", file=sys.stderr)
             publish_mqtt(
                 mqtt_client,
-                TOPIC_ERROR_RTSP,
+                error_rtsp_topic(args.mqtt_client_id),
                 payloads.error_event(
                     component="rtsp-publisher",
                     source=RTSP_URL,
@@ -462,7 +475,7 @@ def main() -> int:
         print("Press Ctrl+C to stop.")
         publish_mqtt(
             mqtt_client,
-            TOPIC_SYSTEM_STATUS,
+            system_status_topic(args.mqtt_client_id),
             payloads.system_status(
                 device_id=args.mqtt_client_id,
                 component="rtsp-publisher",
@@ -482,7 +495,7 @@ def main() -> int:
     finally:
         publish_mqtt(
             mqtt_client,
-            TOPIC_SYSTEM_STATUS,
+            system_status_topic(args.mqtt_client_id),
             payloads.system_status(
                 device_id=args.mqtt_client_id,
                 component="rtsp-publisher",

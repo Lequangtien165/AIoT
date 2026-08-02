@@ -1,0 +1,15 @@
+user aiot-edge
+topic write system/status/pi4-edge-01
+topic write error/rtsp/pi4-edge-01
+topic write motion/detected
+topic read control/stream/pi4-edge-01
+
+user aiot-recognition
+topic write recognition/result
+topic write error/pipeline
+topic write system/status/aiot-recognition
+
+user aiot-logger
+topic read recognition/result
+topic read motion/detected
+topic read error/#
