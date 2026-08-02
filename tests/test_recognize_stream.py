@@ -1,11 +1,26 @@
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from aiot.recognition.face_engine import FaceDetection, FaceEmbedding
 from aiot.tracking.face_tracker import TrackAssignment
-from recognize_stream import LatestFrameReader, RecognitionWorker, StreamFrame, parse_args, scale_bbox, snapshot_tracks, track_counts
+from recognize_stream import (
+    DisplayTrack,
+    LatestFrameReader,
+    RecognitionResult,
+    RecognitionWorker,
+    StreamFrame,
+    handle_result_events,
+    parse_args,
+    render_recognition_result,
+    run_display_loop,
+    scale_bbox,
+    snapshot_tracks,
+    track_counts,
+)
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -195,6 +210,100 @@ class SplitRecognitionWorkerTests(unittest.TestCase):
         self.assertEqual(recognizer.calls, 1)
         self.assertEqual(outcome[3], 2)
         self.assertEqual(outcome[4], 1)
+
+
+class DisplayLoopTests(unittest.TestCase):
+    def setUp(self):
+        self.args = SimpleNamespace(profile=False, recognition_fps=6.0, source="rtsp://camera")
+        self.frame = np.zeros((100, 100, 3), dtype="uint8")
+        self.track = DisplayTrack(1, (10, 10, 40, 40), "Alice", 0.9, "matched", 0)
+        self.event = SimpleNamespace(
+            kind="identity_confirmed", track_id=1, label="Alice", score=0.9, previous_label=None
+        )
+        self.result = RecognitionResult(
+            result_id=4,
+            frame_id=3,
+            timestamp=10.0,
+            latency_ms=12.0,
+            tracks=[self.track],
+            events=[self.event],
+            active_tracks=1,
+            visible_tracks=1,
+            stale_tracks=0,
+            detected_faces=1,
+            embeddings_generated=1,
+            detection_latency_ms=3.0,
+            embedding_latency_ms=4.0,
+        )
+
+    @patch("recognize_stream.log_event")
+    def test_handle_result_events_saves_snapshot_only_for_identity_events(self, log_event):
+        output = Mock()
+        output.save_snapshot.return_value = Path("snapshot.jpg")
+        unknown = SimpleNamespace(
+            kind="unknown", track_id=2, label=None, score=None, previous_label="Alice"
+        )
+
+        payloads = handle_result_events(
+            RecognitionResult(
+                **{**self.result.__dict__, "events": [self.event, unknown]}
+            ),
+            self.frame,
+            output,
+        )
+
+        output.save_snapshot.assert_called_once_with(self.frame, 1, "Alice", 0.9)
+        self.assertEqual(payloads[0]["snapshot_path"], "snapshot.jpg")
+        self.assertNotIn("snapshot_path", payloads[1])
+        self.assertEqual(log_event.call_count, 2)
+
+    @patch("recognize_stream.publish_mqtt")
+    @patch("recognize_stream.handle_result_events", return_value=[{"kind": "identity_confirmed"}])
+    @patch("recognize_stream.draw_tracks")
+    @patch("recognize_stream.time.monotonic", return_value=10.1)
+    def test_render_result_uses_source_frame_and_publishes_once(
+        self, _monotonic, draw_tracks, handle_events, publish_mqtt
+    ):
+        output = Mock()
+        display_frame = self.frame.copy()
+
+        consumed = render_recognition_result(
+            self.args, self.result, self.frame, display_frame, 1.0, output, Mock(), 0
+        )
+
+        self.assertEqual(consumed, 4)
+        draw_tracks.assert_called_once_with(display_frame, [self.track], 1.0, False)
+        handle_events.assert_called_once_with(self.result, self.frame, output)
+        self.assertEqual(publish_mqtt.call_args.args[1], "recognition/result")
+        self.assertEqual(publish_mqtt.call_args.args[2]["result_id"], 4)
+
+    @patch("recognize_stream.poll_exit", side_effect=[False, True])
+    @patch("recognize_stream.cv2.imshow")
+    @patch("recognize_stream.render_recognition_result", side_effect=[4, 4])
+    def test_reuses_result_without_skipping_new_frames(self, render_result, _imshow, _poll_exit):
+        reader = Mock()
+        reader.latest.side_effect = [
+            StreamFrame(1, self.frame, 0.0, 30.0),
+            StreamFrame(2, self.frame.copy(), 0.1, 30.0),
+        ]
+        worker = Mock()
+        worker.latest_result.return_value = self.result
+        output = Mock()
+
+        run_display_loop(self.args, reader, worker, output, Mock())
+
+        self.assertEqual(render_result.call_count, 2)
+        self.assertEqual(output.write_frame.call_count, 2)
+
+    @patch("recognize_stream.poll_exit", return_value=True)
+    def test_no_frame_exits_without_output(self, _poll_exit):
+        reader = Mock()
+        reader.latest.return_value = None
+        output = Mock()
+
+        run_display_loop(self.args, reader, Mock(), output, Mock())
+
+        output.write_frame.assert_not_called()
 
 
 if __name__ == "__main__":

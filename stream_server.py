@@ -357,6 +357,68 @@ def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> M
     return client
 
 
+def monitor_publisher(
+    args: argparse.Namespace,
+    mediamtx: subprocess.Popen[bytes],
+    ffmpeg: subprocess.Popen[bytes],
+    stop_requested: threading.Event,
+    mqtt_client: MqttClient | None,
+) -> int:
+    last_heartbeat = 0.0
+    while True:
+        if mediamtx.poll() is not None:
+            print("MediaMTX stopped unexpectedly.", file=sys.stderr)
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_ERROR_RTSP,
+                payloads.error_event(
+                    component="rtsp-publisher",
+                    source=RTSP_URL,
+                    message="MediaMTX stopped unexpectedly.",
+                ),
+            )
+            return 1
+        if ffmpeg.poll() is not None:
+            print(
+                "FFmpeg stopped unexpectedly. Check the FFmpeg error above for an "
+                "invalid device name, busy camera, unsupported frame rate/size, encoder "
+                "failure, or RTSP publish error.",
+                file=sys.stderr,
+            )
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_ERROR_RTSP,
+                payloads.error_event(
+                    component="rtsp-publisher",
+                    source=RTSP_URL,
+                    message="FFmpeg stopped unexpectedly.",
+                    details={"returncode": ffmpeg.returncode},
+                ),
+            )
+            return ffmpeg.returncode or 1
+        if stop_requested.is_set():
+            print("Stopping RTSP server from MQTT control command.")
+            return 0
+        now = time.monotonic()
+        if now - last_heartbeat >= args.heartbeat_interval:
+            last_heartbeat = now
+            publish_mqtt(
+                mqtt_client,
+                TOPIC_SYSTEM_STATUS,
+                payloads.system_status(
+                    device_id=args.mqtt_client_id,
+                    component="rtsp-publisher",
+                    state="running",
+                    metrics={
+                        "rtsp_url": RTSP_URL,
+                        "mediamtx_pid": mediamtx.pid,
+                        "ffmpeg_pid": ffmpeg.pid,
+                    },
+                ),
+            )
+        time.sleep(0.25)
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -377,11 +439,11 @@ def main() -> int:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1
 
-    mediamtx = subprocess.Popen([str(config.mediamtx_path), str(MEDIA_MTX_CONFIG)])
+    mediamtx: subprocess.Popen[bytes] | None = None
     ffmpeg: subprocess.Popen[bytes] | None = None
-    last_heartbeat = 0.0
 
     try:
+        mediamtx = subprocess.Popen([str(config.mediamtx_path), str(MEDIA_MTX_CONFIG)])
         if not wait_for_rtsp_server(mediamtx):
             print("MediaMTX did not start on 127.0.0.1:8554.", file=sys.stderr)
             publish_mqtt(
@@ -413,59 +475,7 @@ def main() -> int:
                 },
             ),
         )
-
-        while True:
-            if mediamtx.poll() is not None:
-                print("MediaMTX stopped unexpectedly.", file=sys.stderr)
-                publish_mqtt(
-                    mqtt_client,
-                    TOPIC_ERROR_RTSP,
-                    payloads.error_event(
-                        component="rtsp-publisher",
-                        source=RTSP_URL,
-                        message="MediaMTX stopped unexpectedly.",
-                    ),
-                )
-                return 1
-            if ffmpeg.poll() is not None:
-                print(
-                    "FFmpeg stopped unexpectedly. Check the FFmpeg error above for an "
-                    "invalid device name, busy camera, unsupported frame rate/size, encoder "
-                    "failure, or RTSP publish error.",
-                    file=sys.stderr,
-                )
-                publish_mqtt(
-                    mqtt_client,
-                    TOPIC_ERROR_RTSP,
-                    payloads.error_event(
-                        component="rtsp-publisher",
-                        source=RTSP_URL,
-                        message="FFmpeg stopped unexpectedly.",
-                        details={"returncode": ffmpeg.returncode},
-                    ),
-                )
-                return ffmpeg.returncode or 1
-            if stop_requested.is_set():
-                print("Stopping RTSP server from MQTT control command.")
-                return 0
-            now = time.monotonic()
-            if now - last_heartbeat >= args.heartbeat_interval:
-                last_heartbeat = now
-                publish_mqtt(
-                    mqtt_client,
-                    TOPIC_SYSTEM_STATUS,
-                    payloads.system_status(
-                        device_id=args.mqtt_client_id,
-                        component="rtsp-publisher",
-                        state="running",
-                        metrics={
-                            "rtsp_url": RTSP_URL,
-                            "mediamtx_pid": mediamtx.pid,
-                            "ffmpeg_pid": ffmpeg.pid,
-                        },
-                    ),
-                )
-            time.sleep(0.25)
+        return monitor_publisher(args, mediamtx, ffmpeg, stop_requested, mqtt_client)
     except KeyboardInterrupt:
         print("Stopping RTSP server.")
         return 0
