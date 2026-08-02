@@ -114,6 +114,19 @@ python build_index.py
 python recognize_image.py path/to/image.jpg
 ```
 
+For the local IDOC demo dataset, raw data is intentionally not committed. Prepare it locally in this shape:
+
+```text
+dataset/
+  IDOC_manifest.csv
+  IDOC_000001/
+    front.jpg
+    side.jpg
+archive/labels_utf8.csv
+```
+
+`dataset/IDOC_manifest.csv` maps `folder` to the source `ID`; `archive/labels_utf8.csv` supplies the `ID,Sex` columns and may include a UTF-8 BOM. `build_index.py` labels IDOC folders as `ID - Sex`, then writes `database/faces.index` and `database/metadata.json`. Those generated database files and the raw IDOC dataset remain local-only and must be rebuilt after clone.
+
 Download the official MediaPipe short-range BlazeFace model:
 
 ```bash
@@ -258,10 +271,27 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 
 ## MQTT Control Plane and Audit Logging
 
-MQTT is optional. Start a Mosquitto-compatible broker, then enable publisher status and control messages:
+MQTT is optional. A local Mosquitto demo broker is provided with password auth and minimal ACLs:
 
 ```powershell
-python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1
+docker compose up -d mosquitto
+```
+
+The compose file hashes `config/mosquitto/passwords.example` into an ignored runtime `config/mosquitto/passwords` file. Demo users are:
+
+```text
+aiot-edge / edge-secret
+aiot-recognition / recognition-secret
+aiot-logger / logger-secret
+```
+
+The demo ACL allows the edge publisher to write `system/status/pi4-edge-01`, `error/rtsp/pi4-edge-01`, and `motion/detected`, and subscribe to `control/stream/pi4-edge-01`. Recognition can publish `recognition/result`, `error/pipeline`, and `system/status/aiot-recognition`. The logger can only subscribe to audit topics. For LAN or production use, replace the demo passwords and add TLS.
+
+Enable publisher status and control messages:
+
+```powershell
+$env:AIOT_MQTT_PASSWORD="edge-secret"
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
 For a broker that requires credentials, keep the password out of shell history by reading it from an environment variable:
@@ -269,30 +299,47 @@ For a broker that requires credentials, keep the password out of shell history b
 Set `AIOT_MQTT_PASSWORD` in the terminal environment first, then run:
 
 ```powershell
-python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The RTSP publisher emits `system/status` heartbeat messages and subscribes to `control/stream`. A stop command uses this JSON payload:
+The RTSP publisher emits retained `system/status/<device_id>` heartbeat messages and subscribes only to `control/stream/<device_id>`. A stop command for `pi4-edge-01` uses this JSON payload:
 
 ```json
-{"schema_version":1,"action":"stop","requested_by":"cloud","parameters":{}}
+{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}
 ```
 
-The publisher validates `control/stream` messages and only acts on schema version 1. While the publisher is already running, `stop` is the only command that changes process state; `start` and `restart` are logged but not executed by this MVP runtime.
+Publish that command to `control/stream/pi4-edge-01`. The publisher validates schema version, topic, and `target_device_id`; commands for other devices are ignored. This MVP implements only `stop`; `start` and `restart` are not claimed as working supervisor actions.
 
 Enable recognition result publishing:
 
 ```powershell
-python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1
+$env:AIOT_MQTT_PASSWORD="recognition-secret"
+python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1 --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The recognition pipeline publishes `recognition/result`, `system/status`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
+The recognition pipeline publishes `recognition/result`, retained `system/status/aiot-recognition`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
 
 ```powershell
-python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1
+$env:AIOT_MQTT_PASSWORD="logger-secret"
+python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`. `motion/detected` is reserved for the Raspberry Pi PIR edge client; real GPIO integration and live Mosquitto end-to-end validation remain pending. The web UI described in the architecture report is also outside this MQTT/audit MVP.
+The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`; `system/status/<device_id>` and `control/stream/<device_id>` are not stored. It validates `schema_version`, required fields, payload size, redacts RTSP credentials before SQLite insert, and applies default retention of 30 days or 100,000 records. The SQLite DB can still contain recognition events and track metadata, so treat `database/*.sqlite3` as sensitive local runtime data.
+
+Run repeatable unit tests normally:
+
+```powershell
+venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+With the Docker Mosquitto broker running, enable the real broker integration test:
+
+```powershell
+$env:AIOT_RUN_MQTT_INTEGRATION="1"
+venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v
+```
+
+`motion/detected` is reserved for the Raspberry Pi PIR edge client; real GPIO integration, broker restart testing, and the web UI described in the architecture report remain outside this MQTT/audit MVP.
 
 ## Troubleshooting
 

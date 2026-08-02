@@ -14,8 +14,13 @@ import cv2
 import numpy as np
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
-from aiot.mqtt.topics import TOPIC_ERROR_PIPELINE, TOPIC_POLICIES, TOPIC_RECOGNITION_RESULT, TOPIC_SYSTEM_STATUS
+from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, MqttUnavailable, password_from_env
+from aiot.mqtt.topics import (
+    TOPIC_ERROR_PIPELINE,
+    TOPIC_RECOGNITION_RESULT,
+    system_status_topic,
+    topic_policy,
+)
 from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
 
@@ -108,7 +113,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def mqtt_policy(topic: str) -> tuple[int, bool]:
-    policy = TOPIC_POLICIES[topic]
+    policy = topic_policy(topic)
     return policy.qos, policy.retain
 
 
@@ -116,7 +121,10 @@ def publish_mqtt(client: MqttClient | None, topic: str, payload: dict[str, Any])
     if client is None:
         return
     qos, retain = mqtt_policy(topic)
-    client.publish(topic, payload, qos=qos, retain=retain)
+    try:
+        client.publish(topic, payload, qos=qos, retain=retain)
+    except MqttPublishError as error:
+        print(f"[MQTT] {error}", file=sys.stderr)
 
 
 def scale_bbox(bbox: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
@@ -688,7 +696,7 @@ def main() -> int:
             mqtt_client.connect()
             publish_mqtt(
                 mqtt_client,
-                TOPIC_SYSTEM_STATUS,
+                system_status_topic(args.mqtt_client_id),
                 payloads.system_status(
                     device_id=args.mqtt_client_id,
                     component="recognition",
@@ -696,7 +704,7 @@ def main() -> int:
                     message="Recognition pipeline is starting.",
                 ),
             )
-        except MqttUnavailable as error:
+        except (MqttUnavailable, MqttConnectionError) as error:
             print(f"[MQTT] {error}", file=sys.stderr)
             return 1
 
@@ -761,7 +769,7 @@ def main() -> int:
     finally:
         publish_mqtt(
             mqtt_client,
-            TOPIC_SYSTEM_STATUS,
+            system_status_topic(args.mqtt_client_id),
             payloads.system_status(
                 device_id=args.mqtt_client_id,
                 component="recognition",

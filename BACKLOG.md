@@ -95,8 +95,23 @@
 - [x] Validated the MQTT audit flow through a local TCP MQTT broker harness: `recognition/result`, `motion/detected`, and `error/pipeline` were persisted to SQLite, while `system/status` was not persisted.
 - [x] Ran the full unit suite after the MQTT and dataset-label changes: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 89 tests.
 
+### Completed - MQTT Review Follow-up
+
+- [x] Added Docker Compose Mosquitto demo config with password auth, generated ignored password file, and minimal ACLs for edge, recognition, and audit logger users.
+- [x] Changed status/control/error RTSP topics to per-device routes, for example `system/status/pi4-edge-01`, `control/stream/pi4-edge-01`, and `error/rtsp/pi4-edge-01`.
+- [x] Required control payloads to include `target_device_id`; commands for other devices are ignored.
+- [x] Kept the control MVP scoped to `stop`; `start` and `restart` are documented as unsupported supervisor actions.
+- [x] Added MQTT connect fail-fast behavior for broker CONNACK reject/timeout, disconnect logging, reconnect resubscribe, retained status republish, and QoS publish error checks.
+- [x] Added RTSP credential redaction before MQTT publish and before SQLite audit persistence.
+- [x] Added audit validation, payload-size checks, and retention by days or max records.
+- [x] Added unit tests for IDOC label mapping, UTF-8 BOM labels, missing manifest/labels fallback, and `collect_images()` labels.
+- [x] Added a skipped-by-default Mosquitto integration test that can be enabled with `AIOT_RUN_MQTT_INTEGRATION=1`.
+- [x] Validated the Docker Mosquitto broker with the real integration test: `AIOT_RUN_MQTT_INTEGRATION=1 venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v` passed 3 tests.
+- [x] Confirmed correct broker auth behavior: demo users with the documented passwords connect successfully, while an incorrect password is rejected with `Not authorized`.
+- [x] Recreated the Mosquitto container after fixing runtime config permissions; broker logs no longer show password/ACL permission warnings.
+- [x] Validated broker restart/reconnect behavior with Docker restart: clients reconnected, audit subscriptions recovered, a post-restart `error/pipeline` event was persisted, and RTSP credential markers were not stored.
+
 ### Still Open
 
 - [ ] Rebuild `database/faces.index` and `database/metadata.json` after the IDOC relabeling change before running the live recognition demo.
-- [ ] Validate the MQTT flow with a real Mosquitto broker once Mosquitto is available on the target machine.
 - [ ] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.

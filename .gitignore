@@ -15,6 +15,7 @@ database/metadata.json
 database/*.sqlite3
 database/*.sqlite3-wal
 database/*.sqlite3-shm
+config/mosquitto/passwords
 AGENTS.md
 .ignore
 outputs/
