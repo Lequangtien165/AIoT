@@ -25,6 +25,7 @@ from aiot.mqtt.client import (
 from aiot.mqtt.topics import (
     TOPIC_RECOGNITION_RESULT,
     error_pipeline_topic,
+    stream_activity_topic,
     system_status_topic,
     topic_policy,
 )
@@ -70,6 +71,41 @@ class RecognitionResult:
     embedding_latency_ms: float
 
 
+class CloudEdgeSession:
+    def __init__(self, device_id: str) -> None:
+        self.device_id = device_id
+        self._lock = threading.Lock()
+        self.session_id: str | None = None
+        self.last_presence = 0.0
+        self.capture_enabled = threading.Event()
+
+    def update(self, topic: str, payload: dict, retained: bool) -> None:
+        if topic != system_status_topic(self.device_id):
+            return
+        if payload.get("schema_version") != payloads.SCHEMA_VERSION or payload.get("device_id") != self.device_id:
+            return
+        with self._lock:
+            if payload.get("state") == "streaming" and isinstance(payload.get("stream_session_id"), str):
+                self.session_id = payload["stream_session_id"]
+                self.last_presence = 0.0
+                self.capture_enabled.set()
+                print(f"[SESSION] edge={self.device_id} state=streaming session={self.session_id}")
+            elif payload.get("state") in {"monitoring", "stopping", "error"}:
+                self.session_id = None
+                self.capture_enabled.clear()
+                print(f"[SESSION] edge={self.device_id} state={payload.get('state')}; capture disabled")
+
+    def presence_due(self, detected_faces: int, interval: float) -> str | None:
+        if detected_faces < 1:
+            return None
+        with self._lock:
+            now = time.monotonic()
+            if self.session_id is None or now - self.last_presence < interval:
+                return None
+            self.last_presence = now
+            return self.session_id
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Recognize faces from an RTSP stream on Windows.")
     parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL (default: {RTSP_URL}).")
@@ -104,6 +140,8 @@ def parse_args() -> argparse.Namespace:
         "--source-device-id",
         help="Edge device ID for device-scoped pipeline MQTT errors; defaults to --mqtt-client-id.",
     )
+    parser.add_argument("--edge-triggered-session", action="store_true")
+    parser.add_argument("--face-presence-interval", type=float, default=15.0)
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -121,6 +159,10 @@ def parse_args() -> argparse.Namespace:
             password_from_env(args.mqtt_username, args.mqtt_password_env)
         except ValueError as error:
             parser.error(str(error))
+    if args.edge_triggered_session and (not args.mqtt_host or not args.source_device_id):
+        parser.error("--edge-triggered-session requires --mqtt-host and --source-device-id.")
+    if args.face_presence_interval <= 0:
+        parser.error("--face-presence-interval must be positive.")
     return args
 
 
@@ -259,12 +301,21 @@ def track_counts(tracks: list[object], visible_tracks: list[DisplayTrack]) -> tu
 
 
 class LatestFrameReader:
-    def __init__(self, source: str, mirror: bool, reconnect_delay: float) -> None:
+    def __init__(
+        self,
+        source: str,
+        mirror: bool,
+        reconnect_delay: float,
+        capture_enabled: threading.Event | None = None,
+    ) -> None:
         self.source = source
         self.mirror = mirror
         self.reconnect_delay = reconnect_delay
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._capture_enabled = capture_enabled or threading.Event()
+        if capture_enabled is None:
+            self._capture_enabled.set()
         self._thread = threading.Thread(target=self._run, name="LatestFrameReader", daemon=True)
         self._latest: StreamFrame | None = None
         self._frames_read = 0
@@ -296,8 +347,23 @@ class LatestFrameReader:
         camera = None
         frame_id = 0
         reconnecting = False
+        capture_active = False
         try:
             while not self._stop_event.is_set():
+                if not self._capture_enabled.is_set():
+                    if camera is not None:
+                        camera.release()
+                        camera = None
+                    if capture_active:
+                        print("[RTSP] capture released; waiting for edge stream")
+                        capture_active = False
+                    with self._lock:
+                        self._latest = None
+                    self._capture_enabled.wait(0.1)
+                    continue
+                if not capture_active:
+                    print("[RTSP] capture enabled; waiting for edge RTSP stream")
+                    capture_active = True
                 if camera is None:
                     camera = open_capture(self.source)
                     if not camera.isOpened():
@@ -315,6 +381,8 @@ class LatestFrameReader:
                 if not success:
                     camera.release()
                     camera = None
+                    continue
+                if not self._capture_enabled.is_set():
                     continue
                 if self.mirror:
                     frame = cv2.flip(frame, 1)
@@ -593,6 +661,20 @@ def render_recognition_result(
             events=event_payloads,
         ),
     )
+    edge_session = getattr(args, "_edge_session", None)
+    if edge_session is not None:
+        session_id = edge_session.presence_due(result.detected_faces, args.face_presence_interval)
+        if session_id is not None:
+            publish_mqtt(
+                mqtt_client,
+                stream_activity_topic(args.source_device_id),
+                payloads.face_presence(
+                    device_id=args.source_device_id,
+                    stream_session_id=session_id,
+                    face_count=result.detected_faces,
+                ),
+            )
+            print(f"[MQTT] face_presence published session={session_id} faces={result.detected_faces}")
     return result.result_id
 
 
@@ -696,6 +778,8 @@ def main() -> int:
     from aiot.tracking.face_tracker import FaceTracker
 
     mqtt_client: MqttClient | None = None
+    edge_session = CloudEdgeSession(args.source_device_id) if args.edge_triggered_session else None
+    args._edge_session = edge_session
     if args.mqtt_host:
         try:
             mqtt_client = MqttClient(
@@ -705,7 +789,10 @@ def main() -> int:
                 username=args.mqtt_username,
                 password=password_from_env(args.mqtt_username, args.mqtt_password_env),
                 ca_cert=args.mqtt_ca_cert,
+                on_message_metadata=edge_session.update if edge_session is not None else None,
             )
+            if edge_session is not None:
+                mqtt_client.subscribe(system_status_topic(args.source_device_id), qos=0)
             mqtt_client.connect()
             publish_mqtt(
                 mqtt_client,
@@ -748,7 +835,12 @@ def main() -> int:
         return 1
 
     output = StreamOutput(args.record_video, args.snapshot_dir)
-    reader = LatestFrameReader(args.source, mirror=not args.no_mirror, reconnect_delay=args.reconnect_delay)
+    reader = LatestFrameReader(
+        args.source,
+        mirror=not args.no_mirror,
+        reconnect_delay=args.reconnect_delay,
+        capture_enabled=edge_session.capture_enabled if edge_session is not None else None,
+    )
     def on_pipeline_error(frame_id: int, error: Exception) -> None:
         publish_mqtt(
             mqtt_client,

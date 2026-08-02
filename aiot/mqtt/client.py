@@ -12,6 +12,7 @@ from typing import Any
 
 
 MessageHandler = Callable[[str, dict[str, Any]], None]
+MessageMetadataHandler = Callable[[str, dict[str, Any], bool], None]
 ConnectionStateHandler = Callable[[str], None]
 
 
@@ -104,11 +105,13 @@ class MqttClient:
         password: str | None = None,
         ca_cert: str | None = None,
         on_message: MessageHandler | None = None,
+        on_message_metadata: MessageMetadataHandler | None = None,
         on_connection_state: ConnectionStateHandler | None = None,
     ) -> None:
         mqtt = _load_mqtt_module()
         self._mqtt = mqtt
         self._on_message = on_message
+        self._on_message_metadata = on_message_metadata
         self._on_connection_state = on_connection_state
         self._connect_event = threading.Event()
         self._subscription_event = threading.Event()
@@ -265,7 +268,7 @@ class MqttClient:
             print(f"[MQTT] connection state callback failed: {error}", file=sys.stderr)
 
     def _handle_message(self, _client, _userdata, message) -> None:
-        if self._on_message is None:
+        if self._on_message is None and self._on_message_metadata is None:
             return
         try:
             payload = json.loads(message.payload.decode("utf-8"))
@@ -273,5 +276,8 @@ class MqttClient:
             payload = {"raw": message.payload.decode("utf-8", errors="replace")}
         if not isinstance(payload, dict):
             payload = {"raw": payload}
-        self._on_message(message.topic, payload)
+        if self._on_message_metadata is not None:
+            self._on_message_metadata(message.topic, payload, bool(message.retain))
+        if self._on_message is not None:
+            self._on_message(message.topic, payload)
 

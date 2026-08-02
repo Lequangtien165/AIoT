@@ -4,6 +4,9 @@
 *.webp
 /test_images/test_tien.jpg
 .venv/
+.env
+.env.*
+!.env.example
 tools/
 archive/
 data_raw/
@@ -17,6 +20,7 @@ database/*.sqlite3-wal
 database/*.sqlite3-shm
 config/mosquitto/certs/*
 !config/mosquitto/certs/.gitkeep
+certs/
 config/mosquitto/passwords
 AGENTS.md
 .ignore
