@@ -114,6 +114,19 @@ python build_index.py
 python recognize_image.py path/to/image.jpg
 ```
 
+For the local IDOC demo dataset, raw data is intentionally not committed. Prepare it locally in this shape:
+
+```text
+dataset/
+  IDOC_manifest.csv
+  IDOC_000001/
+    front.jpg
+    side.jpg
+archive/labels_utf8.csv
+```
+
+`dataset/IDOC_manifest.csv` maps `folder` to the source `ID`; `archive/labels_utf8.csv` supplies the `ID,Sex` columns and may include a UTF-8 BOM. `build_index.py` labels IDOC folders as `ID - Sex`, then writes `database/faces.index` and `database/metadata.json`. Those generated database files and the raw IDOC dataset remain local-only and must be rebuilt after clone.
+
 Download the official MediaPipe short-range BlazeFace model:
 
 ```bash
@@ -258,10 +271,86 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 
 ## MQTT Control Plane and Audit Logging
 
-MQTT is optional. Start a Mosquitto-compatible broker, then enable publisher status and control messages:
+MQTT is optional. A local Mosquitto demo broker is provided with password auth and minimal ACLs. Docker publishes its plaintext listener only on host `127.0.0.1`, so it is for local development only:
 
 ```powershell
-python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1
+docker compose up -d mosquitto
+```
+
+The compose file copies and hashes `config/mosquitto/passwords.example` inside the broker container. Demo users are:
+
+```text
+aiot-edge / edge-secret
+aiot-recognition / recognition-secret
+aiot-controller / controller-secret
+aiot-logger / logger-secret
+```
+
+The demo ACL allows the edge publisher to write `system/status/pi4-edge-01`, `error/rtsp/pi4-edge-01`, and `motion/detected`, and subscribe to `control/stream/pi4-edge-01`. Recognition can publish `recognition/result`, `error/pipeline/<device_id>`, and `system/status/aiot-recognition`. The controller can publish scoped stream commands. The logger can only subscribe to audit topics.
+
+### MQTT Over LAN With TLS
+
+For a Raspberry Pi or another LAN client, use the TLS broker profile. Do not expose the plaintext `1883` listener to the LAN.
+
+Choose a stable LAN IP or hostname for the cloud laptop. A DHCP reservation is recommended so the broker address does not change. On the cloud laptop, create local development certificates; replace `BROKER_HOSTNAME` and `BROKER_LAN_IP` with the exact hostname and IP that the Pi will use to reach the broker:
+
+```powershell
+openssl req -x509 -newkey rsa:2048 -nodes -keyout config/mosquitto/certs/server.key -out config/mosquitto/certs/server.crt -days 365 -subj "/CN=BROKER_HOSTNAME" -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
+Copy-Item config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
+docker compose --profile tls up -d mosquitto-tls
+```
+
+The certificate SAN must match the address used by the client. For example, if the Pi connects to `192.168.1.20`, include `IP:192.168.1.20`; if it connects to `aiot-cloud.local`, include `DNS:aiot-cloud.local`.
+
+Open inbound TCP port `8883` on the cloud laptop's Private network firewall. Do not use the published demo passwords on LAN. Certificate and private-key files are ignored by Git.
+
+Copy only `config/mosquitto/certs/ca.crt` to the Pi, for example:
+
+```bash
+scp <WINDOWS_USER>@<BROKER_LAN_IP>:"C:/Users/<WINDOWS_USER>/AIoT/config/mosquitto/certs/ca.crt" ~/aiot-certs/ca.crt
+```
+
+On the Pi, start the edge publisher with the TLS broker address and copied CA file:
+
+```bash
+export AIOT_MQTT_PASSWORD='<edge-password>'
+python stream_server.py \
+  --device /dev/video0 \
+  --mqtt-host <BROKER_LAN_IP> \
+  --mqtt-port 8883 \
+  --mqtt-ca-cert ~/aiot-certs/ca.crt \
+  --mqtt-client-id pi4-edge-01 \
+  --mqtt-username aiot-edge \
+  --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+On the cloud laptop, run recognition against the edge RTSP stream:
+
+```powershell
+$env:AIOT_MQTT_PASSWORD="<recognition-password>"
+python recognize_stream.py --source "rtsp://<EDGE_LAN_IP>:8554/camera" --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+Run the audit logger on the cloud laptop in another terminal:
+
+```powershell
+$env:AIOT_MQTT_PASSWORD="<logger-password>"
+python scripts/run_mqtt_logger.py --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+Before starting the full pipeline, verify the Pi can establish a TLS MQTT connection. With `mosquitto-clients` installed on the Pi:
+
+```bash
+mosquitto_sub -h <BROKER_LAN_IP> -p 8883 --cafile ~/aiot-certs/ca.crt -u aiot-edge -P "$AIOT_MQTT_PASSWORD" -t 'control/stream/pi4-edge-01' -d
+```
+
+The expected result is a successful TLS connection followed by a subscription. If it fails, verify the certificate SAN, firewall rule, broker container status (`docker compose --profile tls ps`), LAN routing, and credentials.
+
+Enable publisher status and control messages:
+
+```powershell
+$env:AIOT_MQTT_PASSWORD="edge-secret"
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
 For a broker that requires credentials, keep the password out of shell history by reading it from an environment variable:
@@ -269,30 +358,53 @@ For a broker that requires credentials, keep the password out of shell history b
 Set `AIOT_MQTT_PASSWORD` in the terminal environment first, then run:
 
 ```powershell
-python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
+python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The RTSP publisher emits `system/status` heartbeat messages and subscribes to `control/stream`. A stop command uses this JSON payload:
+The RTSP publisher emits retained `system/status/<device_id>` heartbeat messages and subscribes only to `control/stream/<device_id>`. A stop command for `pi4-edge-01` uses this JSON payload:
 
 ```json
-{"schema_version":1,"action":"stop","requested_by":"cloud","parameters":{}}
+{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}
 ```
 
-The publisher validates `control/stream` messages and only acts on schema version 1. While the publisher is already running, `stop` is the only command that changes process state; `start` and `restart` are logged but not executed by this MVP runtime.
+Publish that command to `control/stream/pi4-edge-01`. The publisher validates schema version, topic, and `target_device_id`; commands for other devices are ignored. This MVP implements only `stop`; `start` and `restart` are not claimed as working supervisor actions.
+
+With the demo broker, publish the command with its authorized controller account:
+
+```powershell
+docker compose exec mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -u aiot-controller -P controller-secret -t control/stream/pi4-edge-01 -m '{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}'
+```
 
 Enable recognition result publishing:
 
 ```powershell
-python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1
+$env:AIOT_MQTT_PASSWORD="recognition-secret"
+python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1 --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD --source-device-id pi4-edge-01
 ```
 
-The recognition pipeline publishes `recognition/result`, `system/status`, and `error/pipeline`. Run the SQLite audit logger in a separate terminal:
+The recognition pipeline publishes `recognition/result`, retained `system/status/aiot-recognition`, and `error/pipeline/<source-device-id>`. Run the SQLite audit logger in a separate terminal:
 
 ```powershell
-python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1
+$env:AIOT_MQTT_PASSWORD="logger-secret"
+python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`. `motion/detected` is reserved for the Raspberry Pi PIR edge client; real GPIO integration and live Mosquitto end-to-end validation remain pending. The web UI described in the architecture report is also outside this MQTT/audit MVP.
+The audit logger subscribes to and persists only `recognition/result`, `motion/detected`, and `error/#`; `system/status/<device_id>` and `control/stream/<device_id>` are not stored. It validates the topic schema, required field types, and payload size; redacts RTSP credentials before SQLite insert; and applies default retention of 30 days or 100,000 records. Age retention uses the logger's local receipt time. The SQLite DB can still contain recognition events and track metadata, so treat `database/*.sqlite3` as sensitive local runtime data.
+
+Run repeatable unit tests normally:
+
+```powershell
+venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+With the Docker Mosquitto broker running, enable the real broker integration test:
+
+```powershell
+$env:AIOT_RUN_MQTT_INTEGRATION="1"
+venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v
+```
+
+`motion/detected` is reserved for the edge motion producer. Real Pi GPIO/software-motion integration and the web UI described in the architecture report remain outside this MQTT/audit MVP. Broker restart behavior still requires repeatable integration coverage before it can be claimed as automated validation.
 
 ## Troubleshooting
 

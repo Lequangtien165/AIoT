@@ -74,3 +74,56 @@
 - [x] Verified Windows cloud consumers reconnect after the Linux ARM64 publisher is restarted.
 - [x] Confirmed stable sustained streaming from the Ubuntu ARM64 VM with the project publisher code.
 - [ ] Validate the separate Raspberry Pi 4 and Pi Camera hardware path.
+
+## 2026-08-02 Progress Notes
+
+### Completed - IDOC Dataset Preparation
+
+- [x] Downloaded and unpacked the IDOC mugshot dataset into local raw-data folders under `data_raw/` and `archive/`.
+- [x] Created a 3,000-image demo subset under `dataset/IDOC_000001` through `dataset/IDOC_001500`, with each folder containing `front.jpg` and `side.jpg`.
+- [x] Verified all 3,000 copied JPEG images decode successfully with OpenCV.
+- [x] Added `dataset/IDOC_manifest.csv` as a lightweight folder-to-source-ID mapping for the selected subset.
+- [x] Updated `build_index.py` so IDOC folders are relabeled from the manifest and `labels_utf8.csv` as `ID - Sex`, for example `A00147 - Male`.
+- [x] Updated `recognize_stream.py` so matched IDOC labels draw red bounding boxes while ordinary enrolled names remain green.
+
+### Completed - MQTT Runtime Validation Fixes
+
+- [x] Installed `paho-mqtt` in the project virtual environment.
+- [x] Fixed `scripts/run_mqtt_logger.py` so it can be run directly from the repository root without `PYTHONPATH=.`.
+- [x] Fixed `aiot/mqtt/client.py` compatibility with `paho-mqtt 2.1.0` `ReasonCode` objects.
+- [x] Added unit tests for MQTT reason-code handling.
+- [x] Validated the MQTT audit flow through a local TCP MQTT broker harness: `recognition/result`, `motion/detected`, and `error/pipeline` were persisted to SQLite, while `system/status` was not persisted.
+- [x] Ran the full unit suite after the MQTT and dataset-label changes: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 89 tests.
+
+### Completed - MQTT Review Follow-up
+
+- [x] Added Docker Compose Mosquitto demo config with password auth, generated ignored password file, and minimal ACLs for edge, recognition, and audit logger users.
+- [x] Changed status/control/error RTSP topics to per-device routes, for example `system/status/pi4-edge-01`, `control/stream/pi4-edge-01`, and `error/rtsp/pi4-edge-01`.
+- [x] Required control payloads to include `target_device_id`; commands for other devices are ignored.
+- [x] Kept the control MVP scoped to `stop`; `start` and `restart` are documented as unsupported supervisor actions.
+- [x] Added MQTT connect fail-fast behavior for broker CONNACK reject/timeout, disconnect logging, reconnect resubscribe, retained status republish, and QoS publish error checks.
+- [x] Added RTSP credential redaction before MQTT publish and before SQLite audit persistence.
+- [x] Added audit validation, payload-size checks, and retention by days or max records.
+- [x] Added unit tests for IDOC label mapping, UTF-8 BOM labels, missing manifest/labels fallback, and `collect_images()` labels.
+- [x] Added a skipped-by-default Mosquitto integration test that can be enabled with `AIOT_RUN_MQTT_INTEGRATION=1`.
+- [x] Validated the Docker Mosquitto broker with the real integration test: `AIOT_RUN_MQTT_INTEGRATION=1 venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v` passed 3 tests.
+- [x] Confirmed correct broker auth behavior: demo users with the documented passwords connect successfully, while an incorrect password is rejected with `Not authorized`.
+- [x] Recreated the Mosquitto container after fixing runtime config permissions; broker logs no longer show password/ACL permission warnings.
+- [x] Validated broker restart/reconnect behavior with Docker restart: clients reconnected, audit subscriptions recovered, a post-restart `error/pipeline` event was persisted, and RTSP credential markers were not stored.
+
+### Completed - MQTT Security and LAN TLS Foundation
+
+- [x] Added the `aiot-controller` broker principal and ACL write access for device-scoped `control/stream/+` commands; validated controller-to-edge command delivery with Docker Mosquitto.
+- [x] Made the local plaintext broker host-only (`127.0.0.1:1883`); it is not exposed to the LAN.
+- [x] Added an optional Mosquitto TLS profile on port `8883`, CA certificate CLI support for MQTT clients, and LAN setup documentation.
+- [x] Added initial-CONNACK/SUBACK failure handling, QoS publish completion checks, reconnect subscription restoration, and safe retained-status republish handling.
+- [x] Scoped recognition pipeline errors to `error/pipeline/<device_id>`.
+- [x] Strengthened audit payload type validation and changed age retention to use the logger's local receipt time.
+- [x] Validated Docker Mosquitto authentication, audit persistence/redaction, and controller-to-edge scoped command delivery with `tests.test_mqtt_mosquitto_integration`.
+
+### Still Open
+
+- [ ] Rebuild `database/faces.index` and `database/metadata.json` after the IDOC relabeling change before running the live recognition demo.
+- [ ] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.
+- [ ] Generate LAN TLS certificates and validate a real TLS MQTT connection from the Raspberry Pi to the cloud broker on port `8883`.
+- [ ] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.
