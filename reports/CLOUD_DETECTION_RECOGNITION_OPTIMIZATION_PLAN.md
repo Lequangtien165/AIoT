@@ -1,4 +1,4 @@
-# InsightFace Detection and Recognition Optimization Plan
+# InsightFace Detection and Recognition Optimization Plan (DONE)
 
 ## Decision
 
@@ -166,13 +166,13 @@ Do not lower recognition thresholds to mask an alignment mismatch.
 Use 1280x720 at 30 FPS, `--det-size 640`, `--recognition-fps 6`, CUDA required,
 30-second warm-up, and at least 120 seconds per scenario.
 
-| Scenario | Required observation |
-| --- | --- |
-| One enrolled face | Stable confirmation and periodic refresh |
-| One unknown face | Valid unknown result without repeat overload |
-| Three faces | All tracks visible; max one embedding per cycle |
-| Motion | Track IDs and selected landmarks remain aligned |
-| Short occlusion | Track TTL and recognition revalidation remain correct |
+| Scenario          | Required observation                                  |
+| ----------------- | ----------------------------------------------------- |
+| One enrolled face | Stable confirmation and periodic refresh              |
+| One unknown face  | Valid unknown result without repeat overload          |
+| Three faces       | All tracks visible; max one embedding per cycle       |
+| Motion            | Track IDs and selected landmarks remain aligned       |
+| Short occlusion   | Track TTL and recognition revalidation remain correct |
 
 Record before/after capture FPS, display FPS, p50/p95 cycle latency, detector
 latency, embedding latency, GPU use, VRAM, time-to-first identity, detected
