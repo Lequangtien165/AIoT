@@ -14,8 +14,20 @@ import cv2
 import numpy as np
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttUnavailable, password_from_env
-from aiot.mqtt.topics import TOPIC_ERROR_PIPELINE, TOPIC_POLICIES, TOPIC_RECOGNITION_RESULT, TOPIC_SYSTEM_STATUS
+from aiot.mqtt.client import (
+    MqttClient,
+    MqttConnectionError,
+    MqttPublishError,
+    MqttSubscriptionError,
+    MqttUnavailable,
+    password_from_env,
+)
+from aiot.mqtt.topics import (
+    TOPIC_RECOGNITION_RESULT,
+    error_pipeline_topic,
+    system_status_topic,
+    topic_policy,
+)
 from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
 
@@ -87,6 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-client-id", default="aiot-recognition")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
+    parser.add_argument(
+        "--source-device-id",
+        help="Edge device ID for device-scoped pipeline MQTT errors; defaults to --mqtt-client-id.",
+    )
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -108,7 +125,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def mqtt_policy(topic: str) -> tuple[int, bool]:
-    policy = TOPIC_POLICIES[topic]
+    policy = topic_policy(topic)
     return policy.qos, policy.retain
 
 
@@ -116,7 +133,10 @@ def publish_mqtt(client: MqttClient | None, topic: str, payload: dict[str, Any])
     if client is None:
         return
     qos, retain = mqtt_policy(topic)
-    client.publish(topic, payload, qos=qos, retain=retain)
+    try:
+        client.publish(topic, payload, qos=qos, retain=retain)
+    except MqttPublishError as error:
+        print(f"[MQTT] {error}", file=sys.stderr)
 
 
 def scale_bbox(bbox: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
@@ -145,6 +165,19 @@ def format_score(score: float | None) -> str:
     return f"{score:.3f}"
 
 
+def is_idoc_label(label: str | None) -> bool:
+    if label is None:
+        return False
+    source_id = label.split(" - ", maxsplit=1)[0]
+    return len(source_id) == 6 and source_id[0] == "A" and source_id[1:].isdigit()
+
+
+def matched_track_color(label: str | None) -> tuple[int, int, int]:
+    if is_idoc_label(label):
+        return (0, 0, 255)
+    return (0, 180, 0)
+
+
 def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool) -> None:
     for track in tracks:
         x1, y1, x2, y2 = scale_bbox(track.bbox, scale)
@@ -152,7 +185,7 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
             color = (150, 150, 150)
             text = f"#{track.track_id} stale"
         elif track.status == "matched":
-            color = (0, 180, 0)
+            color = matched_track_color(track.label)
             text = f"#{track.track_id} {track.label} {format_score(track.score)}"
         elif track.status == "unknown":
             color = (0, 165, 255)
@@ -671,11 +704,12 @@ def main() -> int:
                 client_id=args.mqtt_client_id,
                 username=args.mqtt_username,
                 password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+                ca_cert=args.mqtt_ca_cert,
             )
             mqtt_client.connect()
             publish_mqtt(
                 mqtt_client,
-                TOPIC_SYSTEM_STATUS,
+                system_status_topic(args.mqtt_client_id),
                 payloads.system_status(
                     device_id=args.mqtt_client_id,
                     component="recognition",
@@ -683,7 +717,7 @@ def main() -> int:
                     message="Recognition pipeline is starting.",
                 ),
             )
-        except MqttUnavailable as error:
+        except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
             print(f"[MQTT] {error}", file=sys.stderr)
             return 1
 
@@ -718,9 +752,10 @@ def main() -> int:
     def on_pipeline_error(frame_id: int, error: Exception) -> None:
         publish_mqtt(
             mqtt_client,
-            TOPIC_ERROR_PIPELINE,
+            error_pipeline_topic(args.source_device_id or args.mqtt_client_id),
             payloads.error_event(
                 component="recognition",
+                device_id=args.source_device_id or args.mqtt_client_id,
                 source=args.source,
                 message=str(error),
                 details={"frame_id": frame_id},
@@ -748,7 +783,7 @@ def main() -> int:
     finally:
         publish_mqtt(
             mqtt_client,
-            TOPIC_SYSTEM_STATUS,
+            system_status_topic(args.mqtt_client_id),
             payloads.system_status(
                 device_id=args.mqtt_client_id,
                 component="recognition",

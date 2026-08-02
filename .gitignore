@@ -1,8 +1,13 @@
 *.jpg
 *.jpeg
+*.png
+*.webp
 /test_images/test_tien.jpg
 .venv/
 tools/
+archive/
+data_raw/
+dataset/IDOC_manifest.csv
 __pycache__/
 *.py[cod]
 database/*.index
@@ -10,6 +15,9 @@ database/metadata.json
 database/*.sqlite3
 database/*.sqlite3-wal
 database/*.sqlite3-shm
+config/mosquitto/certs/*
+!config/mosquitto/certs/.gitkeep
+config/mosquitto/passwords
 AGENTS.md
 .ignore
 outputs/

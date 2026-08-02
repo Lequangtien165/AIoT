@@ -35,3 +35,41 @@ TOPIC_POLICIES = {
     TOPIC_ERROR_PIPELINE: TopicPolicy(qos=1, retain=False, persist=True),
 }
 
+
+def topic_for_device(base_topic: str, device_id: str) -> str:
+    clean_device_id = device_id.strip().strip("/")
+    if not clean_device_id:
+        raise ValueError("device_id is required for per-device MQTT topics.")
+    return f"{base_topic}/{clean_device_id}"
+
+
+def system_status_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_SYSTEM_STATUS, device_id)
+
+
+def control_stream_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_CONTROL_STREAM, device_id)
+
+
+def error_rtsp_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_ERROR_RTSP, device_id)
+
+
+def error_pipeline_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_ERROR_PIPELINE, device_id)
+
+
+def topic_policy(topic: str) -> TopicPolicy:
+    policy = TOPIC_POLICIES.get(topic)
+    if policy is not None:
+        return policy
+    if topic.startswith(f"{TOPIC_SYSTEM_STATUS}/"):
+        return TOPIC_POLICIES[TOPIC_SYSTEM_STATUS]
+    if topic.startswith(f"{TOPIC_CONTROL_STREAM}/"):
+        return TOPIC_POLICIES[TOPIC_CONTROL_STREAM]
+    if topic.startswith(f"{TOPIC_ERROR_RTSP}/"):
+        return TOPIC_POLICIES[TOPIC_ERROR_RTSP]
+    if topic.startswith(f"{TOPIC_ERROR_PIPELINE}/"):
+        return TOPIC_POLICIES[TOPIC_ERROR_PIPELINE]
+    return TopicPolicy(qos=1, retain=False, persist=topic.startswith("error/"))
+

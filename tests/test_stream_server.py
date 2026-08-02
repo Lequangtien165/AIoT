@@ -4,6 +4,8 @@ from unittest.mock import Mock, patch
 import unittest
 
 from aiot.streaming.stream_platform import get_platform_config
+from aiot.mqtt import payloads
+from aiot.mqtt.topics import control_stream_topic, system_status_topic, error_rtsp_topic
 from stream_server import (
     CameraDevice,
     RTSP_URL,
@@ -14,6 +16,7 @@ from stream_server import (
     parse_args,
     parse_linux_devices,
     parse_macos_devices,
+    publish_mqtt,
     validate_control_stream_action,
 )
 
@@ -62,14 +65,41 @@ class FfmpegCommandTests(unittest.TestCase):
 
     def test_control_stream_accepts_supported_schema_v1_actions(self):
         self.assertEqual(
-            validate_control_stream_action({"schema_version": 1, "action": "stop"}),
+            validate_control_stream_action(
+                {"schema_version": 1, "target_device_id": "edge-1", "action": "stop"},
+                "edge-1",
+            ),
             "stop",
         )
 
     def test_control_stream_rejects_malformed_or_unsupported_payloads(self):
-        self.assertIsNone(validate_control_stream_action({"schema_version": 2, "action": "stop"}))
-        self.assertIsNone(validate_control_stream_action({"schema_version": 1, "action": "delete"}))
-        self.assertIsNone(validate_control_stream_action({"action": "stop"}))
+        self.assertIsNone(validate_control_stream_action({"schema_version": 2, "action": "stop"}, "edge-1"))
+        self.assertIsNone(
+            validate_control_stream_action(
+                {"schema_version": 1, "target_device_id": "edge-1", "action": "delete"},
+                "edge-1",
+            )
+        )
+        self.assertIsNone(validate_control_stream_action({"action": "stop"}, "edge-1"))
+
+    def test_control_stream_rejects_command_for_another_device(self):
+        message = payloads.stream_control(action="stop", target_device_id="edge-2")
+
+        self.assertIsNone(validate_control_stream_action(message, "edge-1"))
+
+    def test_per_device_topic_helpers_are_stable(self):
+        self.assertEqual(control_stream_topic("edge-1"), "control/stream/edge-1")
+        self.assertEqual(system_status_topic("edge-1"), "system/status/edge-1")
+        self.assertEqual(error_rtsp_topic("edge-1"), "error/rtsp/edge-1")
+
+    def test_publish_uses_per_device_status_retained_policy(self):
+        client = Mock()
+
+        publish_mqtt(client, system_status_topic("edge-1"), {"schema_version": 1})
+
+        client.publish.assert_called_once_with(
+            "system/status/edge-1", {"schema_version": 1}, qos=0, retain=True
+        )
 
     def test_command_preserves_capture_rate_without_frame_duplication(self):
         args = argparse.Namespace(
@@ -227,7 +257,7 @@ class PublisherMonitorTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.ffmpeg.poll.assert_not_called()
-        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp")
+        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp/edge-test")
 
     @patch("stream_server.publish_mqtt")
     def test_ffmpeg_exit_returns_process_code_and_publishes_details(self, publish_mqtt):
@@ -240,7 +270,7 @@ class PublisherMonitorTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 7)
-        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp")
+        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp/edge-test")
         self.assertEqual(publish_mqtt.call_args.args[2]["details"], {"returncode": 7})
 
     @patch("stream_server.publish_mqtt")
@@ -269,7 +299,7 @@ class PublisherMonitorTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual(publish_mqtt.call_args.args[1], "system/status")
+        self.assertEqual(publish_mqtt.call_args.args[1], "system/status/edge-test")
         self.assertEqual(
             publish_mqtt.call_args.args[2]["metrics"],
             {"rtsp_url": RTSP_URL, "mediamtx_pid": 101, "ffmpeg_pid": 202},
