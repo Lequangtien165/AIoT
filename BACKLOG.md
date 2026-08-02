@@ -127,3 +127,5 @@
 - [ ] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.
 - [ ] Generate LAN TLS certificates and validate a real TLS MQTT connection from the Raspberry Pi to the cloud broker on port `8883`.
 - [ ] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.
+- [x] Implement the generic motion-triggered edge session controller: MOG2 monitoring, FFmpeg camera handoff, `stream/activity/<device_id>`, 30-second first-face timeout, and 120-second face-presence lease.
+- [ ] Validate motion-triggered handoff and threshold tuning with real Windows/macOS/Linux cameras, then validate the separate Raspberry Pi Camera CSI adapter.

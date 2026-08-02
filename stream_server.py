@@ -23,11 +23,15 @@ from aiot.mqtt.client import (
 )
 from aiot.mqtt.topics import (
     TOPIC_CONTROL_STREAM,
+    TOPIC_MOTION_DETECTED,
     control_stream_topic,
     error_rtsp_topic,
     system_status_topic,
     topic_policy,
+    stream_activity_topic,
 )
+from aiot.streaming.edge_session import EdgeSessionController, EdgeSessionState
+from aiot.streaming.motion_detector import MotionDetector
 from aiot.streaming.stream_platform import PlatformConfig, get_platform_config
 from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
 
@@ -67,12 +71,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
+    parser.add_argument("--motion-triggered", action="store_true", help="Start RTSP sessions only after significant motion.")
+    parser.add_argument("--motion-device", help="OpenCV camera index/path used while monitoring; defaults to --device.")
+    parser.add_argument("--motion-width", type=int, default=320)
+    parser.add_argument("--motion-height", type=int, default=240)
+    parser.add_argument("--motion-fps", type=float, default=5.0)
+    parser.add_argument("--motion-area-threshold", type=float, default=0.02)
+    parser.add_argument("--motion-window-size", type=int, default=5)
+    parser.add_argument("--motion-trigger-frames", type=int, default=3)
+    parser.add_argument("--motion-warmup", type=float, default=2.0)
+    parser.add_argument("--face-discovery-timeout", type=float, default=30.0)
+    parser.add_argument("--face-keepalive-timeout", type=float, default=120.0)
     args = parser.parse_args()
 
     if args.framerate is not None and args.framerate <= 0:
         parser.error("--framerate must be positive.")
     if args.mqtt_port <= 0 or args.heartbeat_interval <= 0:
         parser.error("--mqtt-port and --heartbeat-interval must be positive.")
+    if args.motion_width <= 0 or args.motion_height <= 0 or args.motion_fps <= 0:
+        parser.error("motion width, height, and fps must be positive.")
+    if not 0 < args.motion_area_threshold <= 1 or args.motion_window_size <= 0:
+        parser.error("motion area threshold must be in (0, 1] and window size must be positive.")
+    if not 0 < args.motion_trigger_frames <= args.motion_window_size:
+        parser.error("motion trigger frames must be within the motion window.")
+    if args.motion_warmup < 0 or args.face_discovery_timeout <= 0 or args.face_keepalive_timeout <= 0:
+        parser.error("motion warmup must be non-negative and session timeouts must be positive.")
     if args.mqtt_username:
         try:
             password_from_env(args.mqtt_username, args.mqtt_password_env)
@@ -349,7 +372,7 @@ def handle_control_message(stop_requested: threading.Event, device_id: str, topi
         print(f"Ignoring unsupported MQTT stream action: {action}", file=sys.stderr)
 
 
-def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> MqttClient | None:
+def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event, session=None) -> MqttClient | None:
     if not args.mqtt_host:
         return None
     client = MqttClient(
@@ -359,11 +382,14 @@ def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> M
         username=args.mqtt_username,
         password=password_from_env(args.mqtt_username, args.mqtt_password_env),
         ca_cert=args.mqtt_ca_cert,
-        on_message=lambda topic, message: handle_control_message(
-            stop_requested, args.mqtt_client_id, topic, message
+        on_message=lambda topic, message: handle_control_message(stop_requested, args.mqtt_client_id, topic, message),
+        on_message_metadata=lambda topic, message, retained: handle_session_activity(
+            session, args.mqtt_client_id, topic, message, retained
         ),
     )
     client.subscribe(control_stream_topic(args.mqtt_client_id), qos=topic_policy(TOPIC_CONTROL_STREAM).qos)
+    if session is not None:
+        client.subscribe(stream_activity_topic(args.mqtt_client_id), qos=1)
     client.connect()
     publish_mqtt(
         client,
@@ -377,6 +403,55 @@ def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> M
         ),
     )
     return client
+
+
+def handle_session_activity(session, device_id: str, topic: str, message: dict, retained: bool) -> None:
+    if session is None or retained or topic != stream_activity_topic(device_id):
+        return
+    if message.get("schema_version") != payloads.SCHEMA_VERSION or message.get("device_id") != device_id:
+        return
+    if message.get("action") != "face_presence":
+        return
+    session.face_presence(message.get("stream_session_id", ""), message.get("face_count"))
+
+
+def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session) -> int:
+    detector_device = args.motion_device or args.device
+    if config.name in {"windows", "macos-arm64"} and not str(detector_device).isdigit():
+        print("--motion-device must be an OpenCV camera index on Windows/macOS.", file=sys.stderr)
+        return 1
+    if str(detector_device).isdigit():
+        detector_device = int(detector_device)
+    while not stop_requested.is_set():
+        detector = MotionDetector(detector_device, width=args.motion_width, height=args.motion_height, fps=args.motion_fps,
+                                  area_threshold=args.motion_area_threshold, window_size=args.motion_window_size,
+                                  trigger_frames=args.motion_trigger_frames, warmup_seconds=args.motion_warmup)
+        try:
+            if not detector.wait_for_motion(stop_requested):
+                break
+        except RuntimeError as error:
+            print(f"Motion detector failed: {error}", file=sys.stderr)
+            return 1
+        session_id = session.begin()
+        publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=True))
+        publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="starting", stream_session_id=session_id))
+        ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
+        time.sleep(1.0)
+        if ffmpeg.poll() is not None:
+            publish_mqtt(mqtt_client, error_rtsp_topic(args.mqtt_client_id), payloads.error_event(component="rtsp-publisher", device_id=args.mqtt_client_id, message="FFmpeg did not start."))
+            session.complete_stop()
+            continue
+        session.publisher_ready()
+        publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="streaming", stream_session_id=session_id, metrics={"rtsp_url": RTSP_URL}))
+        while ffmpeg.poll() is None and mediamtx.poll() is None and not stop_requested.is_set() and not session.expired():
+            time.sleep(0.25)
+        stop_process(ffmpeg)
+        session.complete_stop()
+        publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=False))
+        publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="monitoring"))
+        if stop_requested.is_set():
+            stop_requested.clear()
+    return 0
 
 
 def monitor_publisher(
@@ -455,8 +530,9 @@ def main() -> int:
         return device_status
 
     stop_requested = threading.Event()
+    session = EdgeSessionController(args.face_discovery_timeout, args.face_keepalive_timeout) if args.motion_triggered else None
     try:
-        mqtt_client = connect_mqtt(args, stop_requested)
+        mqtt_client = connect_mqtt(args, stop_requested, session)
     except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1
@@ -479,6 +555,8 @@ def main() -> int:
             )
             return 1
 
+        if args.motion_triggered:
+            return run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session)
         ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
         print(f"Publishing webcam at {RTSP_URL}")
         print("Press Ctrl+C to stop.")
