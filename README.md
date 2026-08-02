@@ -271,6 +271,26 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 
 ## MQTT Control Plane and Audit Logging
 
+### Environment Configuration
+
+Copy `.env.example` to `.env` on both machines and edit the LAN addresses, local CA path, camera values, and role passwords. The file is ignored by Git.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Load it into the current PowerShell session before running a role command:
+
+```powershell
+Get-Content .env | ForEach-Object {
+  if ($_ -match '^\s*([^#=\s]+)\s*=\s*(.*?)\s*$') {
+    Set-Item -Path "Env:$($matches[1])" -Value $matches[2]
+  }
+}
+```
+
+Use role-specific password environment variables with the existing CLI flag, for example `--mqtt-password-env AIOT_EDGE_MQTT_PASSWORD`. This keeps the broker address, certificate path, and secrets out of command history.
+
 MQTT is optional. A local Mosquitto demo broker is provided with password auth and minimal ACLs. Docker publishes its plaintext listener only on host `127.0.0.1`, so it is for local development only:
 
 ```powershell
