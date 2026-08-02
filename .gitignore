@@ -1,5 +1,7 @@
 *.jpg
 *.jpeg
+*.png
+*.webp
 /test_images/test_tien.jpg
 .venv/
 tools/
