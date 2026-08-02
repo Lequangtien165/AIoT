@@ -55,6 +55,10 @@ def error_rtsp_topic(device_id: str) -> str:
     return topic_for_device(TOPIC_ERROR_RTSP, device_id)
 
 
+def error_pipeline_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_ERROR_PIPELINE, device_id)
+
+
 def topic_policy(topic: str) -> TopicPolicy:
     policy = TOPIC_POLICIES.get(topic)
     if policy is not None:
@@ -65,5 +69,7 @@ def topic_policy(topic: str) -> TopicPolicy:
         return TOPIC_POLICIES[TOPIC_CONTROL_STREAM]
     if topic.startswith(f"{TOPIC_ERROR_RTSP}/"):
         return TOPIC_POLICIES[TOPIC_ERROR_RTSP]
+    if topic.startswith(f"{TOPIC_ERROR_PIPELINE}/"):
+        return TOPIC_POLICIES[TOPIC_ERROR_PIPELINE]
     return TopicPolicy(qos=1, retain=False, persist=topic.startswith("error/"))
 

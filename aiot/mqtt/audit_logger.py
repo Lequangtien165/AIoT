@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -49,11 +49,58 @@ def validate_audit_payload(topic: str, payload: dict[str, Any], max_payload_byte
     missing = sorted(required_fields_for_topic(topic) - payload.keys())
     if missing:
         raise ValueError(f"Missing required audit fields for {topic}: {', '.join(missing)}.")
+    _validate_common_payload(payload)
+    _validate_topic_payload(topic, payload)
     redacted_payload = redact_sensitive_values(payload)
     payload_json = json.dumps(redacted_payload, ensure_ascii=False, sort_keys=True)
     if len(payload_json.encode("utf-8")) > max_payload_bytes:
         raise ValueError(f"Audit payload for {topic} exceeds {max_payload_bytes} bytes.")
     return redacted_payload
+
+
+def _is_non_negative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _require_non_empty_string(payload: dict[str, Any], field: str) -> None:
+    if not isinstance(payload.get(field), str) or not payload[field].strip():
+        raise ValueError(f"Audit field {field} must be a non-empty string.")
+
+
+def _validate_common_payload(payload: dict[str, Any]) -> None:
+    if not _is_non_negative_integer(payload.get("ts_ms")):
+        raise ValueError("Audit field ts_ms must be a non-negative integer.")
+
+
+def _validate_topic_payload(topic: str, payload: dict[str, Any]) -> None:
+    if topic == "recognition/result":
+        _require_non_empty_string(payload, "source")
+        for field in ("frame_id", "result_id"):
+            if not _is_non_negative_integer(payload.get(field)):
+                raise ValueError(f"Audit field {field} must be a non-negative integer.")
+        latency_ms = payload.get("latency_ms")
+        if (
+            not isinstance(latency_ms, (int, float))
+            or isinstance(latency_ms, bool)
+            or not math.isfinite(latency_ms)
+            or latency_ms < 0
+        ):
+            raise ValueError("Audit field latency_ms must be a non-negative finite number.")
+        for field in ("tracks", "events"):
+            if not isinstance(payload.get(field), list) or not all(isinstance(item, dict) for item in payload[field]):
+                raise ValueError(f"Audit field {field} must be a list of objects.")
+    elif topic == "motion/detected":
+        _require_non_empty_string(payload, "device_id")
+        _require_non_empty_string(payload, "sensor_id")
+        if not isinstance(payload.get("active"), bool):
+            raise ValueError("Audit field active must be a boolean.")
+    elif topic.startswith("error/"):
+        _require_non_empty_string(payload, "component")
+        _require_non_empty_string(payload, "message")
+        if payload.get("source") is not None and not isinstance(payload["source"], str):
+            raise ValueError("Audit field source must be a string or null.")
+        if payload.get("details", {}) is not None and not isinstance(payload.get("details", {}), dict):
+            raise ValueError("Audit field details must be an object.")
 
 
 def resolve_audit_db_path(path: str | Path | None = None) -> Path:
@@ -126,10 +173,9 @@ class AuditStore:
 
     def _cleanup_locked(self) -> None:
         if self.retention_days > 0:
-            cutoff_ms = int((time.time() - self.retention_days * 24 * 60 * 60) * 1000)
             self._connection.execute(
-                "DELETE FROM mqtt_audit_events WHERE event_ts_ms IS NOT NULL AND event_ts_ms < ?",
-                (cutoff_ms,),
+                "DELETE FROM mqtt_audit_events WHERE received_at < datetime('now', ?)",
+                (f"-{self.retention_days} days",),
             )
         if self.max_records > 0:
             self._connection.execute(
@@ -150,6 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--client-id", default="aiot-audit-logger")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
     parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
     parser.add_argument("--max-records", type=int, default=DEFAULT_MAX_RECORDS)
     parser.add_argument("--max-payload-bytes", type=int, default=MAX_PAYLOAD_BYTES)
@@ -188,6 +235,7 @@ def run_logger(args: argparse.Namespace) -> None:
         client_id=args.client_id,
         username=args.mqtt_username,
         password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+        ca_cert=args.mqtt_ca_cert,
         on_message=on_message,
     )
     for topic in AUDIT_TOPICS:

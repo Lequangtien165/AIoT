@@ -17,7 +17,7 @@
 - MQTT username/password support is available through CLI username flags and password environment variables; passwords are not passed directly on the command line.
 - `control/stream` payloads are validated by schema version and supported action before they can affect the publisher process.
 - PIR sensor support and motion-triggered streaming have not been implemented.
-- Broker-level runtime validation with Mosquitto has not been performed yet.
+- A local Docker Mosquitto broker has been validated for password authentication, audit persistence, and device-scoped topics. TLS LAN validation and real Pi-originated messages remain pending.
 
 ### 3. Consumers and Audit Logging
 
@@ -26,7 +26,7 @@
 - Message payload builders, topic constants, QoS, retained-message policy, and audit topic subscriptions are defined under `aiot/mqtt/`.
 - The audit logger persists only configured audit topics: `recognition/result`, `motion/detected`, and `error/#`.
 - Unit tests cover schema builders, topic coverage, CLI MQTT flags, and SQLite audit persistence.
-- End-to-end validation with a live MQTT broker and real Pi-originated messages has not been performed yet.
+- Local end-to-end validation with Docker Mosquitto is available as an opt-in integration test. Real Pi-originated messages and web consumers remain pending.
 
 ### 4. Live-Surveillance Web Application
 

@@ -4,7 +4,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiot.mqtt.audit_logger import AuditStore, is_audit_topic, parse_args, resolve_audit_db_path
-from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, reason_code_failed
+from aiot.mqtt.client import (
+    MqttClient,
+    MqttConnectionError,
+    MqttPublishError,
+    MqttSubscriptionError,
+    reason_code_failed,
+)
 from aiot.mqtt import payloads
 from aiot.mqtt.topics import (
     AUDIT_TOPICS,
@@ -14,6 +20,7 @@ from aiot.mqtt.topics import (
     TOPIC_RECOGNITION_RESULT,
     TOPIC_SYSTEM_STATUS,
     control_stream_topic,
+    error_pipeline_topic,
     system_status_topic,
 )
 
@@ -43,6 +50,7 @@ class PayloadBuilderTests(unittest.TestCase):
         self.assertEqual(TOPIC_MOTION_DETECTED, "motion/detected")
         self.assertEqual(TOPIC_ERROR_PIPELINE, "error/pipeline")
         self.assertIn("error/#", AUDIT_TOPICS)
+        self.assertEqual(error_pipeline_topic("edge-1"), "error/pipeline/edge-1")
 
     def test_redacts_rtsp_credentials_in_payloads(self):
         url = "rtsp://admin:secret@example.test:8554/camera?profile=1"
@@ -112,13 +120,46 @@ class MqttClientTests(unittest.TestCase):
         with self.assertRaises(MqttPublishError):
             client.publish("recognition/result", {"schema_version": 1}, qos=1)
 
+    @patch("aiot.mqtt.client._load_mqtt_module")
+    def test_publish_raises_when_qos_delivery_times_out(self, load_mqtt):
+        fake_module = FakeMqttModule(connect_reason=0, publish_completed=False)
+        load_mqtt.return_value = fake_module
+        client = MqttClient(host="127.0.0.1", port=1883, client_id="test")
+        client.connect(timeout=0.1)
+
+        with self.assertRaises(MqttPublishError):
+            client.publish("recognition/result", {"schema_version": 1}, qos=1)
+
+    @patch("aiot.mqtt.client._load_mqtt_module")
+    def test_connect_raises_when_subscription_is_rejected(self, load_mqtt):
+        fake_module = FakeMqttModule(connect_reason=0, subscription_reason=135)
+        load_mqtt.return_value = fake_module
+        client = MqttClient(host="127.0.0.1", port=1883, client_id="test")
+        client.subscribe("control/stream/test", qos=1)
+
+        with self.assertRaises(MqttSubscriptionError):
+            client.connect(timeout=0.1)
+
+    @patch("aiot.mqtt.client._load_mqtt_module")
+    def test_client_configures_tls_with_the_supplied_ca_certificate(self, load_mqtt):
+        fake_module = FakeMqttModule(connect_reason=0)
+        load_mqtt.return_value = fake_module
+
+        MqttClient(host="broker.example", port=8883, client_id="test", ca_cert="certs/ca.crt")
+
+        self.assertEqual(fake_module.last_client.tls_ca_cert, "certs/ca.crt")
+
 
 class FakePublishInfo:
-    def __init__(self, rc: int) -> None:
+    def __init__(self, rc: int, completed: bool) -> None:
         self.rc = rc
+        self.completed = completed
 
-    def wait_for_publish(self, timeout: float | None = None) -> bool:
-        return self.rc == 0
+    def wait_for_publish(self, timeout: float | None = None) -> None:
+        return None
+
+    def is_published(self) -> bool:
+        return self.completed
 
 
 class FakePahoClient:
@@ -128,9 +169,13 @@ class FakePahoClient:
         self.on_disconnect = None
         self.on_message = None
         self.subscriptions = []
+        self.tls_ca_cert = None
 
     def username_pw_set(self, _username, _password) -> None:
         pass
+
+    def tls_set(self, *, ca_certs: str) -> None:
+        self.tls_ca_cert = ca_certs
 
     def reconnect_delay_set(self, min_delay: int, max_delay: int) -> None:
         self.reconnect_delay = (min_delay, max_delay)
@@ -150,9 +195,13 @@ class FakePahoClient:
 
     def subscribe(self, topic: str, qos: int = 0) -> None:
         self.subscriptions.append((topic, qos))
+        mid = len(self.subscriptions)
+        if self.on_subscribe is not None:
+            self.on_subscribe(self, None, mid, [self.module.subscription_reason], None)
+        return self.module.MQTT_ERR_SUCCESS, mid
 
     def publish(self, _topic, _payload, qos: int = 0, retain: bool = False) -> FakePublishInfo:
-        return FakePublishInfo(self.module.publish_rc)
+        return FakePublishInfo(self.module.publish_rc, self.module.publish_completed)
 
 
 class FakeMqttModule:
@@ -161,12 +210,23 @@ class FakeMqttModule:
     class CallbackAPIVersion:
         VERSION2 = object()
 
-    def __init__(self, *, connect_reason: int | None, publish_rc: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        connect_reason: int | None,
+        publish_rc: int = 0,
+        publish_completed: bool = True,
+        subscription_reason: int = 0,
+    ) -> None:
         self.connect_reason = connect_reason
         self.publish_rc = publish_rc
+        self.publish_completed = publish_completed
+        self.subscription_reason = subscription_reason
+        self.last_client = None
 
     def Client(self, **kwargs):
-        return FakePahoClient(self, **kwargs)
+        self.last_client = FakePahoClient(self, **kwargs)
+        return self.last_client
 
 
 class AuditStoreTests(unittest.TestCase):
@@ -298,6 +358,62 @@ class AuditStoreTests(unittest.TestCase):
                         )
                 finally:
                     store.close()
+
+    def test_record_rejects_invalid_field_types(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_dir = Path(temp_dir) / "database"
+            with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
+                store = AuditStore(database_dir / "audit.sqlite3")
+                try:
+                    with self.assertRaises(ValueError):
+                        store.record(
+                            TOPIC_MOTION_DETECTED,
+                            {
+                                "schema_version": 1,
+                                "ts_ms": True,
+                                "device_id": "edge-1",
+                                "sensor_id": "motion",
+                                "active": "true",
+                            },
+                        )
+                finally:
+                    store.close()
+
+    def test_age_retention_uses_local_receipt_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_dir = Path(temp_dir) / "database"
+            with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
+                store = AuditStore(database_dir / "audit.sqlite3", retention_days=1, max_records=0)
+                try:
+                    old_event_time = {
+                        "schema_version": 1,
+                        "ts_ms": 1,
+                        "component": "recognition",
+                        "message": "recently received",
+                    }
+                    store.record(error_pipeline_topic("edge-1"), old_event_time)
+                    rows = store._connection.execute("SELECT payload_json FROM mqtt_audit_events").fetchall()
+                    self.assertEqual(len(rows), 1)
+
+                    store._connection.execute(
+                        "UPDATE mqtt_audit_events SET received_at = datetime('now', '-2 days')"
+                    )
+                    store._connection.commit()
+                    store.record(
+                        error_pipeline_topic("edge-1"),
+                        {
+                            "schema_version": 1,
+                            "ts_ms": 2,
+                            "component": "recognition",
+                            "message": "current",
+                        },
+                    )
+                    rows = store._connection.execute("SELECT payload_json FROM mqtt_audit_events").fetchall()
+                finally:
+                    store.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("current", rows[0][0])
 
     def test_record_applies_max_records_retention(self):
         with tempfile.TemporaryDirectory() as temp_dir:

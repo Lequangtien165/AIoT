@@ -95,12 +95,14 @@ def error_event(
     component: str,
     message: str,
     source: str | None = None,
+    device_id: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "ts_ms": now_ms(),
         "component": component,
+        "device_id": device_id,
         "source": redact_rtsp_url(source) if source else None,
         "message": message,
         "details": redact_sensitive_values(details or {}),

@@ -14,10 +14,17 @@ import cv2
 import numpy as np
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, MqttUnavailable, password_from_env
+from aiot.mqtt.client import (
+    MqttClient,
+    MqttConnectionError,
+    MqttPublishError,
+    MqttSubscriptionError,
+    MqttUnavailable,
+    password_from_env,
+)
 from aiot.mqtt.topics import (
-    TOPIC_ERROR_PIPELINE,
     TOPIC_RECOGNITION_RESULT,
+    error_pipeline_topic,
     system_status_topic,
     topic_policy,
 )
@@ -92,6 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-client-id", default="aiot-recognition")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
+    parser.add_argument(
+        "--source-device-id",
+        help="Edge device ID for device-scoped pipeline MQTT errors; defaults to --mqtt-client-id.",
+    )
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -692,6 +704,7 @@ def main() -> int:
                 client_id=args.mqtt_client_id,
                 username=args.mqtt_username,
                 password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+                ca_cert=args.mqtt_ca_cert,
             )
             mqtt_client.connect()
             publish_mqtt(
@@ -704,7 +717,7 @@ def main() -> int:
                     message="Recognition pipeline is starting.",
                 ),
             )
-        except (MqttUnavailable, MqttConnectionError) as error:
+        except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
             print(f"[MQTT] {error}", file=sys.stderr)
             return 1
 
@@ -739,9 +752,10 @@ def main() -> int:
     def on_pipeline_error(frame_id: int, error: Exception) -> None:
         publish_mqtt(
             mqtt_client,
-            TOPIC_ERROR_PIPELINE,
+            error_pipeline_topic(args.source_device_id or args.mqtt_client_id),
             payloads.error_event(
                 component="recognition",
+                device_id=args.source_device_id or args.mqtt_client_id,
                 source=args.source,
                 message=str(error),
                 details={"frame_id": frame_id},

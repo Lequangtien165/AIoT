@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from aiot.mqtt.topics import (
     TOPIC_MOTION_DETECTED,
     TOPIC_RECOGNITION_RESULT,
     control_stream_topic,
+    error_pipeline_topic,
     system_status_topic,
     topic_policy,
 )
@@ -83,8 +85,12 @@ class MosquittoIntegrationTests(unittest.TestCase):
                         qos=1,
                     )
                     recognizer.publish(
-                        TOPIC_ERROR_PIPELINE,
-                        payloads.error_event(component="recognition", message="pipeline failed"),
+                        error_pipeline_topic("pi4-edge-01"),
+                        payloads.error_event(
+                            component="recognition",
+                            device_id="pi4-edge-01",
+                            message="pipeline failed",
+                        ),
                         qos=1,
                     )
                     edge.publish(
@@ -115,13 +121,41 @@ class MosquittoIntegrationTests(unittest.TestCase):
 
         topics = [row[0] for row in rows]
         payload_json = "\n".join(row[1] for row in rows)
-        self.assertEqual(topics, [TOPIC_RECOGNITION_RESULT, TOPIC_MOTION_DETECTED, TOPIC_ERROR_PIPELINE])
+        self.assertEqual(
+            topics,
+            [TOPIC_RECOGNITION_RESULT, TOPIC_MOTION_DETECTED, error_pipeline_topic("pi4-edge-01")],
+        )
         self.assertIn("rtsp://***:***@example.test:8554/camera", payload_json)
         self.assertNotIn("secret", payload_json)
         self.assertNotIn(system_status_topic("pi4-edge-01"), topics)
 
-    def test_control_topic_is_scoped_per_device(self):
-        self.assertEqual(control_stream_topic("pi4-edge-01"), "control/stream/pi4-edge-01")
+    def test_controller_can_publish_to_the_scoped_edge_control_topic(self):
+        received = []
+        received_event = threading.Event()
+        edge = None
+        controller = None
+        try:
+            edge = MqttClient(
+                host=self.host,
+                port=self.port,
+                client_id="integration-edge-control",
+                username="aiot-edge",
+                password="edge-secret",
+                on_message=lambda topic, message: (received.append((topic, message)), received_event.set()),
+            )
+            edge.subscribe(control_stream_topic("pi4-edge-01"), qos=1)
+            edge.connect(timeout=5.0)
+            controller = self.connect_client("integration-controller", "aiot-controller", "controller-secret")
+            command = payloads.stream_control(action="stop", target_device_id="pi4-edge-01")
+            controller.publish(control_stream_topic("pi4-edge-01"), command, qos=1)
+
+            self.assertTrue(received_event.wait(5.0))
+            self.assertEqual(received, [(control_stream_topic("pi4-edge-01"), command)])
+        finally:
+            if controller is not None:
+                controller.close()
+            if edge is not None:
+                edge.close()
 
 
 if __name__ == "__main__":
