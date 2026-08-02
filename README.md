@@ -34,11 +34,11 @@ Use a dedicated Python 3.14 virtual environment. The stream dependencies are cro
 
 ### Windows
 
-From PowerShell in this project directory:
+Run these commands from Git Bash in this project directory. Windows recognition commands in this README require Windows AMD64; they are not supported on macOS or Linux.
 
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python scripts/setup_tools.py
@@ -92,7 +92,7 @@ python scripts/setup_tools.py --force
 
 Install the Windows-only recognition backend after the common dependencies. Install InsightFace without its dependencies so it cannot install `opencv-python` alongside `opencv-contrib-python`.
 
-```powershell
+```bash
 python -m pip install -r requirements-recognition-windows.txt
 python -m pip install --no-deps insightface==1.0.1
 ```
@@ -101,7 +101,7 @@ python -m pip install --no-deps insightface==1.0.1
 
 Verify that ONNX Runtime can bind the InsightFace detector to CUDA:
 
-```powershell
+```bash
 python -c "import onnxruntime as ort; ort.preload_dlls(directory=''); print('available', ort.get_available_providers()); s=ort.InferenceSession(r'C:\Users\Qtienle\.insightface\models\buffalo_l\det_10g.onnx', providers=['CUDAExecutionProvider','CPUExecutionProvider']); print('active', s.get_providers())"
 ```
 
@@ -109,7 +109,7 @@ The expected result includes `CUDAExecutionProvider` in `active`. If `active` is
 
 Build the enrollment index before recognition. Enrollment images belong in `dataset/<person>/` and must have one face each.
 
-```powershell
+```bash
 python build_index.py
 python recognize_image.py path/to/image.jpg
 ```
@@ -152,7 +152,7 @@ python stream_server.py
 
 For scripts or automation, provide the device explicitly. On Windows use the exact DirectShow device name:
 
-```powershell
+```bash
 python stream_server.py --device "Integrated Camera"
 ```
 
@@ -192,7 +192,7 @@ On the first macOS capture attempt, grant camera access to the terminal applicat
 
 ## Module 2: Face Detector
 
-In a separate Bash terminal, activate the virtual environment and run. Use the matching activation command for your platform:
+In a separate Bash terminal, activate the virtual environment and run. On Windows, use Git Bash:
 
 ```bash
 source .venv/Scripts/activate
@@ -218,11 +218,10 @@ When the publisher is stopped or the stream temporarily fails, the detector keep
 
 ## Realtime Recognition (Windows Only)
 
-After starting the RTSP publisher and building the index, open a second terminal:
+After starting the RTSP publisher and building the index, open a second Git Bash terminal on Windows:
 
-```powershell
-cd A:\face_reg
-.\venv\Scripts\Activate.ps1
+```bash
+source .venv/Scripts/activate
 python recognize_stream.py --recognition-fps 2 --profile --require-gpu
 ```
 
@@ -236,7 +235,7 @@ GPU active
 
 The production recognition path uses the InsightFace `buffalo_l` bundle only. SCRFD detects every face for tracking, then ArcFace creates an embedding only for scheduler-selected tracks. The default budget is one embedding per detection cycle, so a crowded frame does not trigger ArcFace work for every face at once. The display loop stays responsive because frame capture, inference, and rendering run as separate stages. Press `Q`, `Esc`, or `Ctrl+C` to stop. If `--recognition-fps 2` is stable, increase it gradually:
 
-```powershell
+```bash
 python recognize_stream.py \
   --threshold 0.45 \
   --recognition-fps 4 \
@@ -249,7 +248,7 @@ Then try `--recognition-fps 6` if the GPU latency remains low. `--recognition-fp
 
 Watch GPU usage from a third terminal:
 
-```powershell
+```bash
 nvidia-smi -l 1
 ```
 
@@ -257,7 +256,7 @@ The process list should show `python.exe`, and GPU memory or utilization should 
 
 Video recording is optional. A snapshot is saved only when a track first becomes `MATCH` or its confirmed identity changes. `outputs/` is ignored by Git.
 
-```powershell
+```bash
 python recognize_stream.py \
   --threshold 0.45 \
   --recognition-fps 6 \
@@ -275,25 +274,23 @@ On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a 
 
 Copy `.env.example` to `.env` on both machines and edit the LAN addresses, local CA path, camera values, and role passwords. The file is ignored by Git.
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
-Load it into the current PowerShell session before running a role command:
+Load it into the current Bash session before running a role command. The example `.env` uses shell-compatible `KEY=value` entries:
 
-```powershell
-Get-Content .env | ForEach-Object {
-  if ($_ -match '^\s*([^#=\s]+)\s*=\s*(.*?)\s*$') {
-    Set-Item -Path "Env:$($matches[1])" -Value $matches[2]
-  }
-}
+```bash
+set -a
+source .env
+set +a
 ```
 
 Use role-specific password environment variables with the existing CLI flag, for example `--mqtt-password-env AIOT_EDGE_MQTT_PASSWORD`. This keeps the broker address, certificate path, and secrets out of command history.
 
 MQTT is optional. A local Mosquitto demo broker is provided with password auth and minimal ACLs. Docker publishes its plaintext listener only on host `127.0.0.1`, so it is for local development only:
 
-```powershell
+```bash
 docker compose up -d mosquitto
 ```
 
@@ -314,9 +311,9 @@ For a Raspberry Pi or another LAN client, use the TLS broker profile. Do not exp
 
 Choose a stable LAN IP or hostname for the cloud laptop. A DHCP reservation is recommended so the broker address does not change. On the cloud laptop, create local development certificates; replace `BROKER_HOSTNAME` and `BROKER_LAN_IP` with the exact hostname and IP that the Pi will use to reach the broker:
 
-```powershell
-openssl req -x509 -newkey rsa:2048 -nodes -keyout config/mosquitto/certs/server.key -out config/mosquitto/certs/server.crt -days 365 -subj "/CN=BROKER_HOSTNAME" -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
-Copy-Item config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
+```bash
+MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -keyout config/mosquitto/certs/server.key -out config/mosquitto/certs/server.crt -days 365 -subj "/CN=BROKER_HOSTNAME" -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
+cp config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
 docker compose --profile tls up -d mosquitto-tls
 ```
 
@@ -330,7 +327,7 @@ Copy only `config/mosquitto/certs/ca.crt` to the Pi, for example:
 scp <WINDOWS_USER>@<BROKER_LAN_IP>:"C:/Users/<WINDOWS_USER>/AIoT/config/mosquitto/certs/ca.crt" ~/aiot-certs/ca.crt
 ```
 
-On the Pi, start the edge publisher with the TLS broker address and copied CA file:
+On the Edge device, start the publisher with the TLS broker address and copied CA file:
 
 ```bash
 export AIOT_MQTT_PASSWORD='<edge-password>'
@@ -344,21 +341,21 @@ python stream_server.py \
   --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-On the cloud laptop, run recognition against the edge RTSP stream:
+On the **Windows AMD64 cloud laptop**, run this from Git Bash to recognize the edge RTSP stream:
 
-```powershell
-$env:AIOT_MQTT_PASSWORD="<recognition-password>"
+```bash
+export AIOT_MQTT_PASSWORD='<recognition-password>'
 python recognize_stream.py --source "rtsp://<EDGE_LAN_IP>:8554/camera" --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
 Run the audit logger on the cloud laptop in another terminal:
 
-```powershell
-$env:AIOT_MQTT_PASSWORD="<logger-password>"
+```bash
+export AIOT_MQTT_PASSWORD='<logger-password>'
 python scripts/run_mqtt_logger.py --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-Before starting the full pipeline, verify the Pi can establish a TLS MQTT connection. With `mosquitto-clients` installed on the Pi:
+Before starting the full pipeline, verify the Pi can establish a TLS MQTT connection. With `mosquitto-clients` installed on the Edge device:
 
 ```bash
 mosquitto_sub -h <BROKER_LAN_IP> -p 8883 --cafile ~/aiot-certs/ca.crt -u aiot-edge -P "$AIOT_MQTT_PASSWORD" -t 'control/stream/pi4-edge-01' -d
@@ -368,8 +365,8 @@ The expected result is a successful TLS connection followed by a subscription. I
 
 Enable publisher status and control messages:
 
-```powershell
-$env:AIOT_MQTT_PASSWORD="edge-secret"
+```bash
+export AIOT_MQTT_PASSWORD='edge-secret'
 python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
@@ -377,35 +374,41 @@ For a broker that requires credentials, keep the password out of shell history b
 
 Set `AIOT_MQTT_PASSWORD` in the terminal environment first, then run:
 
-```powershell
+```bash
 python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
 The RTSP publisher emits retained `system/status/<device_id>` heartbeat messages and subscribes only to `control/stream/<device_id>`. A stop command for `pi4-edge-01` uses this JSON payload:
 
 ```json
-{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}
+{
+  "schema_version": 1,
+  "target_device_id": "pi4-edge-01",
+  "action": "stop",
+  "requested_by": "cloud",
+  "parameters": {}
+}
 ```
 
 Publish that command to `control/stream/pi4-edge-01`. The publisher validates schema version, topic, and `target_device_id`; commands for other devices are ignored. This MVP implements only `stop`; `start` and `restart` are not claimed as working supervisor actions.
 
 With the demo broker, publish the command with its authorized controller account:
 
-```powershell
+```bash
 docker compose exec mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -u aiot-controller -P controller-secret -t control/stream/pi4-edge-01 -m '{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}'
 ```
 
-Enable recognition result publishing:
+Enable recognition result publishing from **Windows AMD64 Git Bash**:
 
-```powershell
-$env:AIOT_MQTT_PASSWORD="recognition-secret"
+```bash
+export AIOT_MQTT_PASSWORD='recognition-secret'
 python recognize_stream.py --recognition-fps 4 --profile --mqtt-host 127.0.0.1 --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD --source-device-id pi4-edge-01
 ```
 
 The recognition pipeline publishes `recognition/result`, retained `system/status/aiot-recognition`, and `error/pipeline/<source-device-id>`. Run the SQLite audit logger in a separate terminal:
 
-```powershell
-$env:AIOT_MQTT_PASSWORD="logger-secret"
+```bash
+export AIOT_MQTT_PASSWORD='logger-secret'
 python scripts/run_mqtt_logger.py --mqtt-host 127.0.0.1 --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
@@ -413,15 +416,14 @@ The audit logger subscribes to and persists only `recognition/result`, `motion/d
 
 Run repeatable unit tests normally:
 
-```powershell
-venv\Scripts\python.exe -m unittest discover -s tests -v
+```bash
+python -m unittest discover -s tests -v
 ```
 
 With the Docker Mosquitto broker running, enable the real broker integration test:
 
-```powershell
-$env:AIOT_RUN_MQTT_INTEGRATION="1"
-venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v
+```bash
+AIOT_RUN_MQTT_INTEGRATION=1 python -m unittest tests.test_mqtt_mosquitto_integration -v
 ```
 
 `motion/detected` is reserved for the edge motion producer. Real Pi GPIO/software-motion integration and the web UI described in the architecture report remain outside this MQTT/audit MVP. Broker restart behavior still requires repeatable integration coverage before it can be claimed as automated validation.
@@ -434,7 +436,8 @@ venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v
 python stream_server.py --device /dev/video0 --motion-triggered --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ~/aiot-certs/ca.crt --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-```powershell
+```bash
+# Windows AMD64 cloud laptop only; run from Git Bash.
 python recognize_stream.py --source "rtsp://<EDGE_LAN_IP>:8554/camera" --edge-triggered-session --source-device-id pi4-edge-01 --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
