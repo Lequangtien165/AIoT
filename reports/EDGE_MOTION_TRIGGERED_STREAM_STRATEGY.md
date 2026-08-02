@@ -1,4 +1,4 @@
-# Edge-Triggered Face Session Strategy
+# Edge-Triggered Face Session Strategy (DONE)
 
 ## Chosen Parameters
 
