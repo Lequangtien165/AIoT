@@ -3,7 +3,7 @@ services:
     image: eclipse-mosquitto:2.0
     container_name: aiot-mosquitto
     ports:
-      - "1883:1883"
+      - "127.0.0.1:1883:1883"
     volumes:
       - ./config/mosquitto:/mosquitto/config
       - mosquitto-data:/mosquitto/data
@@ -20,6 +20,30 @@ services:
       && chmod 0600 /tmp/mosquitto-config/passwords
       && exec mosquitto -c /tmp/mosquitto-config/mosquitto.conf"
 
+  mosquitto-tls:
+    profiles: ["tls"]
+    image: eclipse-mosquitto:2.0
+    container_name: aiot-mosquitto-tls
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./config/mosquitto:/mosquitto/config:ro
+      - mosquitto-tls-data:/mosquitto/data
+      - mosquitto-tls-log:/mosquitto/log
+    command: >
+      sh -c "mkdir -p /tmp/mosquitto-config
+      && cp /mosquitto/config/mosquitto-tls.conf /tmp/mosquitto-config/mosquitto.conf
+      && cp /mosquitto/config/aclfile /tmp/mosquitto-config/aclfile
+      && cp /mosquitto/config/passwords.example /tmp/mosquitto-config/passwords
+      && chown -R mosquitto:mosquitto /tmp/mosquitto-config
+      && chmod 0700 /tmp/mosquitto-config
+      && chmod 0600 /tmp/mosquitto-config/passwords /tmp/mosquitto-config/aclfile
+      && mosquitto_passwd -U /tmp/mosquitto-config/passwords
+      && chmod 0600 /tmp/mosquitto-config/passwords
+      && exec mosquitto -c /tmp/mosquitto-config/mosquitto.conf"
+
 volumes:
   mosquitto-data:
   mosquitto-log:
+  mosquitto-tls-data:
+  mosquitto-tls-log:

@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, MqttUnavailable, password_from_env
+from aiot.mqtt.client import (
+    MqttClient,
+    MqttConnectionError,
+    MqttPublishError,
+    MqttSubscriptionError,
+    MqttUnavailable,
+    password_from_env,
+)
 from aiot.mqtt.topics import (
     TOPIC_CONTROL_STREAM,
     control_stream_topic,
@@ -58,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-client-id", default="aiot-edge-publisher")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     args = parser.parse_args()
 
@@ -350,6 +358,7 @@ def connect_mqtt(args: argparse.Namespace, stop_requested: threading.Event) -> M
         client_id=args.mqtt_client_id,
         username=args.mqtt_username,
         password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+        ca_cert=args.mqtt_ca_cert,
         on_message=lambda topic, message: handle_control_message(
             stop_requested, args.mqtt_client_id, topic, message
         ),
@@ -448,7 +457,7 @@ def main() -> int:
     stop_requested = threading.Event()
     try:
         mqtt_client = connect_mqtt(args, stop_requested)
-    except (MqttUnavailable, MqttConnectionError) as error:
+    except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1
 

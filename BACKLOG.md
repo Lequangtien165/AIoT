@@ -111,7 +111,19 @@
 - [x] Recreated the Mosquitto container after fixing runtime config permissions; broker logs no longer show password/ACL permission warnings.
 - [x] Validated broker restart/reconnect behavior with Docker restart: clients reconnected, audit subscriptions recovered, a post-restart `error/pipeline` event was persisted, and RTSP credential markers were not stored.
 
+### Completed - MQTT Security and LAN TLS Foundation
+
+- [x] Added the `aiot-controller` broker principal and ACL write access for device-scoped `control/stream/+` commands; validated controller-to-edge command delivery with Docker Mosquitto.
+- [x] Made the local plaintext broker host-only (`127.0.0.1:1883`); it is not exposed to the LAN.
+- [x] Added an optional Mosquitto TLS profile on port `8883`, CA certificate CLI support for MQTT clients, and LAN setup documentation.
+- [x] Added initial-CONNACK/SUBACK failure handling, QoS publish completion checks, reconnect subscription restoration, and safe retained-status republish handling.
+- [x] Scoped recognition pipeline errors to `error/pipeline/<device_id>`.
+- [x] Strengthened audit payload type validation and changed age retention to use the logger's local receipt time.
+- [x] Validated Docker Mosquitto authentication, audit persistence/redaction, and controller-to-edge scoped command delivery with `tests.test_mqtt_mosquitto_integration`.
+
 ### Still Open
 
 - [ ] Rebuild `database/faces.index` and `database/metadata.json` after the IDOC relabeling change before running the live recognition demo.
 - [ ] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.
+- [ ] Generate LAN TLS certificates and validate a real TLS MQTT connection from the Raspberry Pi to the cloud broker on port `8883`.
+- [ ] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.

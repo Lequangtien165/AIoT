@@ -6,8 +6,11 @@ topic read control/stream/pi4-edge-01
 
 user aiot-recognition
 topic write recognition/result
-topic write error/pipeline
+topic write error/pipeline/+
 topic write system/status/aiot-recognition
+
+user aiot-controller
+topic write control/stream/+
 
 user aiot-logger
 topic read recognition/result
