@@ -412,7 +412,11 @@ def handle_session_activity(session, device_id: str, topic: str, message: dict, 
         return
     if message.get("action") != "face_presence":
         return
-    session.face_presence(message.get("stream_session_id", ""), message.get("face_count"))
+    if session.face_presence(message.get("stream_session_id", ""), message.get("face_count")):
+        print(
+            f"[MQTT] face_presence accepted session={message['stream_session_id']} "
+            f"faces={message['face_count']} lease={session.keepalive_timeout:.0f}s"
+        )
 
 
 def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session) -> int:
@@ -426,6 +430,11 @@ def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, se
         detector = MotionDetector(detector_device, width=args.motion_width, height=args.motion_height, fps=args.motion_fps,
                                   area_threshold=args.motion_area_threshold, window_size=args.motion_window_size,
                                   trigger_frames=args.motion_trigger_frames, warmup_seconds=args.motion_warmup)
+        print(
+            f"[MOTION] monitoring device={detector_device} size={args.motion_width}x{args.motion_height} "
+            f"fps={args.motion_fps:g} threshold={args.motion_area_threshold:.3f} "
+            f"trigger={args.motion_trigger_frames}/{args.motion_window_size}"
+        )
         try:
             if not detector.wait_for_motion(stop_requested):
                 break
@@ -433,22 +442,36 @@ def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, se
             print(f"Motion detector failed: {error}", file=sys.stderr)
             return 1
         session_id = session.begin()
+        print(f"[MOTION] triggered; starting session={session_id}")
         publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=True))
         publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="starting", stream_session_id=session_id))
         ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
+        print(f"[RTSP] publisher starting pid={ffmpeg.pid} session={session_id}")
         time.sleep(1.0)
         if ffmpeg.poll() is not None:
+            print(f"[RTSP] publisher failed during startup session={session_id}", file=sys.stderr)
             publish_mqtt(mqtt_client, error_rtsp_topic(args.mqtt_client_id), payloads.error_event(component="rtsp-publisher", device_id=args.mqtt_client_id, message="FFmpeg did not start."))
             session.complete_stop()
             continue
         session.publisher_ready()
+        print(
+            f"[SESSION] state=streaming device={args.mqtt_client_id} session={session_id} "
+            f"discovery_timeout={session.discovery_timeout:.0f}s"
+        )
         publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="streaming", stream_session_id=session_id, metrics={"rtsp_url": RTSP_URL}))
         while ffmpeg.poll() is None and mediamtx.poll() is None and not stop_requested.is_set() and not session.expired():
             time.sleep(0.25)
+        if session.expired():
+            print(f"[SESSION] lease expired session={session_id}; stopping publisher")
+        elif stop_requested.is_set():
+            print(f"[SESSION] stop command received; ending session={session_id}")
+        else:
+            print(f"[RTSP] publisher or MediaMTX exited for session={session_id}", file=sys.stderr)
         stop_process(ffmpeg)
         session.complete_stop()
         publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=False))
         publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="monitoring"))
+        print(f"[SESSION] state=monitoring device={args.mqtt_client_id}")
         if stop_requested.is_set():
             stop_requested.clear()
     return 0
