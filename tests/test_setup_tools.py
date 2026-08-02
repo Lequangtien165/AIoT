@@ -1,6 +1,7 @@
 import hashlib
 import io
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -16,6 +17,7 @@ from scripts.setup_tools import (
     install_archive,
     main,
     safe_extract,
+    safe_extract_tar,
     ssl,
     verify_linux_ffmpeg,
     verify_checksum,
@@ -74,6 +76,48 @@ class ChecksumTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as zip_file:
                 with self.assertRaises(RuntimeError):
                     safe_extract(zip_file, root / "extract")
+
+    def test_safe_extract_tar_extracts_regular_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive = root / "safe.tar"
+            with tarfile.open(archive, "w") as tar_file:
+                info = tarfile.TarInfo("bin/tool")
+                content = b"verified"
+                info.size = len(content)
+                tar_file.addfile(info, io.BytesIO(content))
+
+            with tarfile.open(archive) as tar_file:
+                safe_extract_tar(tar_file, root / "extract")
+
+            self.assertEqual((root / "extract" / "bin" / "tool").read_bytes(), b"verified")
+
+    def test_safe_extract_tar_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive = root / "unsafe.tar"
+            with tarfile.open(archive, "w") as tar_file:
+                info = tarfile.TarInfo("../escape.txt")
+                info.size = 2
+                tar_file.addfile(info, io.BytesIO(b"no"))
+
+            with tarfile.open(archive) as tar_file:
+                with self.assertRaises(RuntimeError):
+                    safe_extract_tar(tar_file, root / "extract")
+
+    def test_safe_extract_tar_rejects_unsafe_symlink_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive = root / "unsafe-link.tar"
+            with tarfile.open(archive, "w") as tar_file:
+                link = tarfile.TarInfo("bin/tool")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../escape"
+                tar_file.addfile(link)
+
+            with tarfile.open(archive) as tar_file:
+                with self.assertRaises(tarfile.TarError):
+                    safe_extract_tar(tar_file, root / "extract")
 
 
 class DownloadTests(unittest.TestCase):
