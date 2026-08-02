@@ -406,6 +406,22 @@ venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v
 
 `motion/detected` is reserved for the edge motion producer. Real Pi GPIO/software-motion integration and the web UI described in the architecture report remain outside this MQTT/audit MVP. Broker restart behavior still requires repeatable integration coverage before it can be claimed as automated validation.
 
+## Motion-Triggered Edge Sessions
+
+`stream_server.py` keeps its existing always-stream behavior by default. Enable `--motion-triggered` to run a low-rate OpenCV MOG2 monitor while idle, then start FFmpeg only after significant motion. The cloud recognition client renews the stream lease when it detects a face: the first face must arrive within 30 seconds, and later face-presence messages renew a 120-second lease every 15 seconds.
+
+```bash
+python stream_server.py --device /dev/video0 --motion-triggered --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ~/aiot-certs/ca.crt --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+```powershell
+python recognize_stream.py --source "rtsp://<EDGE_LAN_IP>:8554/camera" --edge-triggered-session --source-device-id pi4-edge-01 --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert config/mosquitto/certs/ca.crt --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+The motion baseline is `320x240` at `5 FPS`, MOG2, a 2% changed-area threshold, and a 3-of-5-frame trigger. Adjust it with the `--motion-*` flags after camera testing. On Windows and macOS, pass an OpenCV camera index through `--motion-device`; Linux V4L2 can reuse `/dev/videoN`.
+
+The first implementation supports webcam/V4L2 capture. Raspberry Pi Camera CSI remains a separately unvalidated adapter; do not claim Pi Camera support until it has been tested with the `rpicam-*` stack.
+
 ## Troubleshooting
 
 - `Missing local tools`: run `python scripts/setup_tools.py`.

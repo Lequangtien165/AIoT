@@ -11,6 +11,7 @@ TOPIC_CONTROL_STREAM = "control/stream"
 TOPIC_RECOGNITION_RESULT = "recognition/result"
 TOPIC_ERROR_RTSP = "error/rtsp"
 TOPIC_ERROR_PIPELINE = "error/pipeline"
+TOPIC_STREAM_ACTIVITY = "stream/activity"
 
 AUDIT_TOPICS = (
     TOPIC_RECOGNITION_RESULT,
@@ -33,6 +34,7 @@ TOPIC_POLICIES = {
     TOPIC_RECOGNITION_RESULT: TopicPolicy(qos=1, retain=False, persist=True),
     TOPIC_ERROR_RTSP: TopicPolicy(qos=1, retain=False, persist=True),
     TOPIC_ERROR_PIPELINE: TopicPolicy(qos=1, retain=False, persist=True),
+    TOPIC_STREAM_ACTIVITY: TopicPolicy(qos=1, retain=False, persist=False),
 }
 
 
@@ -59,6 +61,10 @@ def error_pipeline_topic(device_id: str) -> str:
     return topic_for_device(TOPIC_ERROR_PIPELINE, device_id)
 
 
+def stream_activity_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_STREAM_ACTIVITY, device_id)
+
+
 def topic_policy(topic: str) -> TopicPolicy:
     policy = TOPIC_POLICIES.get(topic)
     if policy is not None:
@@ -71,5 +77,7 @@ def topic_policy(topic: str) -> TopicPolicy:
         return TOPIC_POLICIES[TOPIC_ERROR_RTSP]
     if topic.startswith(f"{TOPIC_ERROR_PIPELINE}/"):
         return TOPIC_POLICIES[TOPIC_ERROR_PIPELINE]
+    if topic.startswith(f"{TOPIC_STREAM_ACTIVITY}/"):
+        return TOPIC_POLICIES[TOPIC_STREAM_ACTIVITY]
     return TopicPolicy(qos=1, retain=False, persist=topic.startswith("error/"))
 
