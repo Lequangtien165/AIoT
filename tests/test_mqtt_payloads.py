@@ -21,6 +21,7 @@ from aiot.mqtt.topics import (
     TOPIC_SYSTEM_STATUS,
     control_stream_topic,
     error_pipeline_topic,
+    stream_activity_topic,
     system_status_topic,
 )
 
@@ -51,6 +52,7 @@ class PayloadBuilderTests(unittest.TestCase):
         self.assertEqual(TOPIC_ERROR_PIPELINE, "error/pipeline")
         self.assertIn("error/#", AUDIT_TOPICS)
         self.assertEqual(error_pipeline_topic("edge-1"), "error/pipeline/edge-1")
+        self.assertEqual(stream_activity_topic("edge-1"), "stream/activity/edge-1")
 
     def test_redacts_rtsp_credentials_in_payloads(self):
         url = "rtsp://admin:secret@example.test:8554/camera?profile=1"
@@ -78,6 +80,12 @@ class PayloadBuilderTests(unittest.TestCase):
         message = payloads.stream_control(action="stop", target_device_id="edge-1")
 
         self.assertEqual(message["target_device_id"], "edge-1")
+
+    def test_face_presence_has_session_and_face_count(self):
+        message = payloads.face_presence(device_id="edge-1", stream_session_id="session-1", face_count=1)
+
+        self.assertEqual(message["action"], "face_presence")
+        self.assertEqual(message["stream_session_id"], "session-1")
 
 
 class MqttClientTests(unittest.TestCase):

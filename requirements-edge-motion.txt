@@ -1,0 +1,5 @@
+# Optional edge-only dependencies for --motion-triggered mode.
+numpy==2.5.1
+opencv-contrib-python==5.0.0.93
+paho-mqtt==2.1.0
+certifi

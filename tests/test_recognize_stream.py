@@ -9,6 +9,7 @@ from aiot.recognition.face_engine import FaceDetection, FaceEmbedding
 from aiot.tracking.face_tracker import TrackAssignment
 from recognize_stream import (
     DisplayTrack,
+    CloudEdgeSession,
     LatestFrameReader,
     RecognitionResult,
     RecognitionWorker,
@@ -164,6 +165,34 @@ class LatestFrameReaderTests(unittest.TestCase):
     def test_latest_without_frames_returns_none(self):
         reader = LatestFrameReader("rtsp://127.0.0.1:8554/camera", mirror=False, reconnect_delay=1.0)
         self.assertIsNone(reader.latest())
+
+
+class CloudEdgeSessionTests(unittest.TestCase):
+    def test_retained_streaming_status_enables_capture_and_presence(self):
+        session = CloudEdgeSession("edge-1")
+        session.update(
+            "system/status/edge-1",
+            {"schema_version": 1, "device_id": "edge-1", "state": "streaming", "stream_session_id": "one"},
+            retained=True,
+        )
+
+        self.assertTrue(session.capture_enabled.is_set())
+        self.assertEqual(session.presence_due(1, 15), "one")
+
+    def test_monitoring_status_disables_capture(self):
+        session = CloudEdgeSession("edge-1")
+        session.update(
+            "system/status/edge-1",
+            {"schema_version": 1, "device_id": "edge-1", "state": "streaming", "stream_session_id": "one"},
+            retained=False,
+        )
+        session.update(
+            "system/status/edge-1",
+            {"schema_version": 1, "device_id": "edge-1", "state": "monitoring"},
+            retained=False,
+        )
+
+        self.assertFalse(session.capture_enabled.is_set())
 
 
 class SplitRecognitionWorkerTests(unittest.TestCase):

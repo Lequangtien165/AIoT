@@ -57,6 +57,7 @@ def system_status(
     component: str,
     message: str | None = None,
     metrics: dict[str, Any] | None = None,
+    stream_session_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -66,6 +67,7 @@ def system_status(
         "state": state,
         "message": message,
         "metrics": redact_sensitive_values(metrics or {}),
+        "stream_session_id": stream_session_id,
     }
 
 
@@ -138,5 +140,16 @@ def stream_control(
         "target_device_id": target_device_id,
         "action": action,
         "parameters": redact_sensitive_values(parameters or {}),
+    }
+
+
+def face_presence(*, device_id: str, stream_session_id: str, face_count: int) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ts_ms": now_ms(),
+        "device_id": device_id,
+        "stream_session_id": stream_session_id,
+        "action": "face_presence",
+        "face_count": face_count,
     }
 
