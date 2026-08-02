@@ -74,3 +74,29 @@
 - [x] Verified Windows cloud consumers reconnect after the Linux ARM64 publisher is restarted.
 - [x] Confirmed stable sustained streaming from the Ubuntu ARM64 VM with the project publisher code.
 - [ ] Validate the separate Raspberry Pi 4 and Pi Camera hardware path.
+
+## 2026-08-02 Progress Notes
+
+### Completed - IDOC Dataset Preparation
+
+- [x] Downloaded and unpacked the IDOC mugshot dataset into local raw-data folders under `data_raw/` and `archive/`.
+- [x] Created a 3,000-image demo subset under `dataset/IDOC_000001` through `dataset/IDOC_001500`, with each folder containing `front.jpg` and `side.jpg`.
+- [x] Verified all 3,000 copied JPEG images decode successfully with OpenCV.
+- [x] Added `dataset/IDOC_manifest.csv` as a lightweight folder-to-source-ID mapping for the selected subset.
+- [x] Updated `build_index.py` so IDOC folders are relabeled from the manifest and `labels_utf8.csv` as `ID - Sex`, for example `A00147 - Male`.
+- [x] Updated `recognize_stream.py` so matched IDOC labels draw red bounding boxes while ordinary enrolled names remain green.
+
+### Completed - MQTT Runtime Validation Fixes
+
+- [x] Installed `paho-mqtt` in the project virtual environment.
+- [x] Fixed `scripts/run_mqtt_logger.py` so it can be run directly from the repository root without `PYTHONPATH=.`.
+- [x] Fixed `aiot/mqtt/client.py` compatibility with `paho-mqtt 2.1.0` `ReasonCode` objects.
+- [x] Added unit tests for MQTT reason-code handling.
+- [x] Validated the MQTT audit flow through a local TCP MQTT broker harness: `recognition/result`, `motion/detected`, and `error/pipeline` were persisted to SQLite, while `system/status` was not persisted.
+- [x] Ran the full unit suite after the MQTT and dataset-label changes: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 89 tests.
+
+### Still Open
+
+- [ ] Rebuild `database/faces.index` and `database/metadata.json` after the IDOC relabeling change before running the live recognition demo.
+- [ ] Validate the MQTT flow with a real Mosquitto broker once Mosquitto is available on the target machine.
+- [ ] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.

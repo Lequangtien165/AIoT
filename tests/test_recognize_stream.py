@@ -14,6 +14,8 @@ from recognize_stream import (
     RecognitionWorker,
     StreamFrame,
     handle_result_events,
+    is_idoc_label,
+    matched_track_color,
     parse_args,
     render_recognition_result,
     run_display_loop,
@@ -84,6 +86,16 @@ class ScaleBBoxTests(unittest.TestCase):
 
     def test_scale_bbox_scales_coordinates(self):
         self.assertEqual(scale_bbox((10, 20, 30, 40), 0.5), (5, 10, 15, 20))
+
+
+class MatchedTrackColorTests(unittest.TestCase):
+    def test_idoc_label_uses_red_box(self):
+        self.assertTrue(is_idoc_label("A00147 - Male"))
+        self.assertEqual(matched_track_color("A00147 - Male"), (0, 0, 255))
+
+    def test_regular_label_uses_green_box(self):
+        self.assertFalse(is_idoc_label("Alice"))
+        self.assertEqual(matched_track_color("Alice"), (0, 180, 0))
 
 
 class SnapshotTracksTests(unittest.TestCase):

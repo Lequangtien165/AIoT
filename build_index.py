@@ -2,6 +2,7 @@
 
 
 from pathlib import Path
+import csv
 import json
 import sys
 
@@ -21,6 +22,11 @@ DATABASE_DIR = Path("database")
 
 INDEX_PATH = DATABASE_DIR / "faces.index"
 METADATA_PATH = DATABASE_DIR / "metadata.json"
+IDOC_MANIFEST_PATH = DATASET_DIR / "IDOC_manifest.csv"
+IDOC_LABELS_PATHS = (
+    Path("archive") / "labels_utf8.csv",
+    Path("data_raw") / "elliotp_idoc-mugshots" / "labels_utf8.csv",
+)
 
 VALID_EXTENSIONS = {
     ".jpg",
@@ -28,6 +34,35 @@ VALID_EXTENSIONS = {
     ".png",
     ".webp",
 }
+
+
+def load_idoc_labels() -> dict[str, str]:
+    """Return display labels for IDOC demo folders, e.g. A00147 - Male."""
+    if not IDOC_MANIFEST_PATH.exists():
+        return {}
+
+    source_to_sex: dict[str, str] = {}
+    for labels_path in IDOC_LABELS_PATHS:
+        if not labels_path.exists():
+            continue
+        with labels_path.open("r", encoding="utf-8-sig", newline="") as file:
+            for row in csv.DictReader(file):
+                source_id = row.get("ID", "").strip()
+                sex = row.get("Sex", "").strip()
+                if source_id:
+                    source_to_sex[source_id] = sex
+        break
+
+    folder_to_label: dict[str, str] = {}
+    with IDOC_MANIFEST_PATH.open("r", encoding="utf-8", newline="") as file:
+        for row in csv.DictReader(file):
+            folder = row.get("folder", "").strip()
+            source_id = row.get("source_id", "").strip()
+            if not folder or not source_id:
+                continue
+            sex = source_to_sex.get(source_id)
+            folder_to_label[folder] = f"{source_id} - {sex}" if sex else source_id
+    return folder_to_label
 
 
 def collect_images() -> list[tuple[str, Path]]:
@@ -46,11 +81,13 @@ def collect_images() -> list[tuple[str, Path]]:
             f"{DATASET_DIR.resolve()}"
         )
 
+    idoc_labels = load_idoc_labels()
+
     for person_dir in sorted(DATASET_DIR.iterdir()):
         if not person_dir.is_dir():
             continue
 
-        person_name = person_dir.name
+        person_name = idoc_labels.get(person_dir.name, person_dir.name)
 
         for image_path in sorted(person_dir.iterdir()):
             if image_path.suffix.lower() not in VALID_EXTENSIONS:

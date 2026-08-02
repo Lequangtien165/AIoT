@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiot.mqtt.audit_logger import AuditStore, is_audit_topic, parse_args, resolve_audit_db_path
+from aiot.mqtt.client import reason_code_failed
 from aiot.mqtt import payloads
 from aiot.mqtt.topics import (
     AUDIT_TOPICS,
@@ -40,6 +41,19 @@ class PayloadBuilderTests(unittest.TestCase):
         self.assertEqual(TOPIC_MOTION_DETECTED, "motion/detected")
         self.assertEqual(TOPIC_ERROR_PIPELINE, "error/pipeline")
         self.assertIn("error/#", AUDIT_TOPICS)
+
+
+class MqttClientTests(unittest.TestCase):
+    def test_reason_code_failed_supports_paho_integer_codes(self):
+        self.assertFalse(reason_code_failed(0))
+        self.assertTrue(reason_code_failed(5))
+
+    def test_reason_code_failed_supports_paho_reason_code_objects(self):
+        success = type("ReasonCode", (), {"value": 0})()
+        failure = type("ReasonCode", (), {"value": 135})()
+
+        self.assertFalse(reason_code_failed(success))
+        self.assertTrue(reason_code_failed(failure))
 
 
 class AuditStoreTests(unittest.TestCase):
