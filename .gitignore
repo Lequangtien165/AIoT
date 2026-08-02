@@ -3,6 +3,9 @@
 /test_images/test_tien.jpg
 .venv/
 tools/
+archive/
+data_raw/
+dataset/IDOC_manifest.csv
 __pycache__/
 *.py[cod]
 database/*.index

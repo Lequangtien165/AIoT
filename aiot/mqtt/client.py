@@ -38,6 +38,28 @@ def password_from_env(username: str | None, password_env: str | None) -> str | N
     return password
 
 
+def reason_code_failed(reason_code: object) -> bool:
+    try:
+        return int(reason_code) != 0
+    except (TypeError, ValueError):
+        pass
+
+    value = getattr(reason_code, "value", None)
+    if value is not None:
+        try:
+            return int(value) != 0
+        except (TypeError, ValueError):
+            pass
+
+    is_failure = getattr(reason_code, "is_failure", None)
+    if callable(is_failure):
+        return bool(is_failure())
+    if is_failure is not None:
+        return bool(is_failure)
+
+    return str(reason_code).lower() not in {"0", "success"}
+
+
 class MqttClient:
     def __init__(
         self,
@@ -85,7 +107,7 @@ class MqttClient:
         )
 
     def _handle_connect(self, client, _userdata, _flags, reason_code, _properties) -> None:
-        if int(reason_code) != 0:
+        if reason_code_failed(reason_code):
             print(f"[MQTT] connect failed: {reason_code}", file=sys.stderr)
             return
         for topic, qos in self._subscriptions:

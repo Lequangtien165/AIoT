@@ -145,6 +145,19 @@ def format_score(score: float | None) -> str:
     return f"{score:.3f}"
 
 
+def is_idoc_label(label: str | None) -> bool:
+    if label is None:
+        return False
+    source_id = label.split(" - ", maxsplit=1)[0]
+    return len(source_id) == 6 and source_id[0] == "A" and source_id[1:].isdigit()
+
+
+def matched_track_color(label: str | None) -> tuple[int, int, int]:
+    if is_idoc_label(label):
+        return (0, 0, 255)
+    return (0, 180, 0)
+
+
 def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool) -> None:
     for track in tracks:
         x1, y1, x2, y2 = scale_bbox(track.bbox, scale)
@@ -152,7 +165,7 @@ def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, sta
             color = (150, 150, 150)
             text = f"#{track.track_id} stale"
         elif track.status == "matched":
-            color = (0, 180, 0)
+            color = matched_track_color(track.label)
             text = f"#{track.track_id} {track.label} {format_score(track.score)}"
         elif track.status == "unknown":
             color = (0, 165, 255)
