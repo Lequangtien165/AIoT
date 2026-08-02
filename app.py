@@ -66,31 +66,45 @@ def render_frame(frame, detector: FaceDetector) -> bool:
     return cv2.waitKey(1) & 0xFF in (27, ord("q"))
 
 
+def open_or_reconnect(source: str, reconnecting: bool, delay: float):
+    camera = open_camera(source)
+    if camera is not None:
+        return camera, False, False
+    reconnecting, should_stop = wait_for_reconnect(
+        source, reconnecting, "Could not open RTSP stream", delay
+    )
+    return None, reconnecting, should_stop
+
+
+def read_or_reconnect(camera, source: str, reconnecting: bool, delay: float):
+    success, frame = camera.read()
+    if success:
+        return camera, frame, reconnecting, False
+    camera.release()
+    reconnecting, should_stop = wait_for_reconnect(source, reconnecting, "Lost RTSP stream", delay)
+    return None, None, reconnecting, should_stop
+
+
 def run_preview(source: str, reconnect_delay: float, detector: FaceDetector) -> None:
     camera = None
     reconnecting = False
     try:
         while True:
             if camera is None:
-                camera = open_camera(source)
-                if camera is None:
-                    reconnecting, should_stop = wait_for_reconnect(
-                        source, reconnecting, "Could not open RTSP stream", reconnect_delay
-                    )
-                    if should_stop:
-                        return
-                    continue
-                reconnecting = False
-
-            success, frame = camera.read()
-            if not success:
-                camera.release()
-                camera = None
-                reconnecting, should_stop = wait_for_reconnect(
-                    source, reconnecting, "Lost RTSP stream", reconnect_delay
+                camera, reconnecting, should_stop = open_or_reconnect(
+                    source, reconnecting, reconnect_delay
                 )
                 if should_stop:
                     return
+                if camera is None:
+                    continue
+
+            camera, frame, reconnecting, should_stop = read_or_reconnect(
+                camera, source, reconnecting, reconnect_delay
+            )
+            if should_stop:
+                return
+            if frame is None:
                 continue
             if render_frame(frame, detector):
                 return

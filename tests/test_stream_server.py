@@ -1,6 +1,6 @@
 import argparse
 import subprocess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 
 from aiot.streaming.stream_platform import get_platform_config
@@ -10,6 +10,7 @@ from stream_server import (
     build_ffmpeg_command,
     choose_device,
     get_video_devices,
+    monitor_publisher,
     parse_args,
     parse_linux_devices,
     parse_macos_devices,
@@ -206,6 +207,74 @@ class LinuxDeviceTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(devices, [CameraDevice("Camera (/dev/video0)", "/dev/video0")])
         self.assertEqual(run.call_args.args[0], ["v4l2-ctl", "--list-devices"])
+
+
+class PublisherMonitorTests(unittest.TestCase):
+    def setUp(self):
+        self.args = argparse.Namespace(heartbeat_interval=5.0, mqtt_client_id="edge-test")
+        self.mediamtx = Mock(pid=101)
+        self.ffmpeg = Mock(pid=202)
+        self.stop_requested = Mock()
+        self.client = Mock()
+
+    @patch("stream_server.publish_mqtt")
+    def test_mediamtx_exit_publishes_rtsp_error(self, publish_mqtt):
+        self.mediamtx.poll.return_value = 1
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, self.ffmpeg, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 1)
+        self.ffmpeg.poll.assert_not_called()
+        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp")
+
+    @patch("stream_server.publish_mqtt")
+    def test_ffmpeg_exit_returns_process_code_and_publishes_details(self, publish_mqtt):
+        self.mediamtx.poll.return_value = None
+        self.ffmpeg.poll.return_value = 7
+        self.ffmpeg.returncode = 7
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, self.ffmpeg, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 7)
+        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp")
+        self.assertEqual(publish_mqtt.call_args.args[2]["details"], {"returncode": 7})
+
+    @patch("stream_server.publish_mqtt")
+    def test_stop_request_exits_without_error(self, publish_mqtt):
+        self.mediamtx.poll.return_value = None
+        self.ffmpeg.poll.return_value = None
+        self.stop_requested.is_set.return_value = True
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, self.ffmpeg, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 0)
+        publish_mqtt.assert_not_called()
+
+    @patch("stream_server.time.sleep")
+    @patch("stream_server.time.monotonic", side_effect=[5.0])
+    @patch("stream_server.publish_mqtt")
+    def test_heartbeat_includes_process_ids(self, publish_mqtt, _monotonic, sleep):
+        self.mediamtx.poll.return_value = None
+        self.ffmpeg.poll.return_value = None
+        self.stop_requested.is_set.side_effect = [False, True]
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, self.ffmpeg, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(publish_mqtt.call_args.args[1], "system/status")
+        self.assertEqual(
+            publish_mqtt.call_args.args[2]["metrics"],
+            {"rtsp_url": RTSP_URL, "mediamtx_pid": 101, "ffmpeg_pid": 202},
+        )
+        sleep.assert_called_once_with(0.25)
 
 
 if __name__ == "__main__":
