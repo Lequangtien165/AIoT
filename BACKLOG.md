@@ -1,5 +1,49 @@
 # Backlog
 
+## Current Priority - Demo And Report Release Gates
+
+The two gates below are the only implementation priorities before the report and live demo. All other unchecked work remains valuable but is post-demo work unless it is explicitly listed as a gate acceptance criterion. Completing both parent checkboxes makes the project demo-ready as an operable multi-platform prototype; it does not claim production-hardening is complete.
+
+### Gate 1 - Automate Edge Deployment By Profile
+
+- [ ] Deliver one managed publisher entry point for every supported deployment profile, with no manually managed MediaMTX terminal on Raspberry Pi.
+- [ ] Define and document explicit profiles: `rpi-csi`, `v4l2`, `avfoundation`, and `dshow`; require an explicit profile where auto-detection is ambiguous.
+- [ ] Refactor `stream_server.py` so MediaMTX is always supervised but FFmpeg is an optional publisher child, rather than a mandatory process.
+- [ ] Add the `rpi-csi` profile: use a dedicated MediaMTX `rpiCamera` configuration, hardware H.264, and direct RTSP publishing without FFmpeg.
+- [ ] Add profile-specific preflight checks; Pi CSI must validate Linux ARM64, `rpicam-*`, camera availability, MediaMTX, and the RTSP port without requiring V4L2 or `libx264`.
+- [ ] Preserve and smoke-test the existing Windows DirectShow, macOS AVFoundation, and Linux V4L2 publisher profiles.
+- [ ] Add a Pi systemd deployment unit that starts the managed `rpi-csi` entry point at boot and restarts it after a failure.
+- [ ] Demonstrate Pi boot/service restart -> RTSP recovery -> cloud `app.py` and `recognize_stream.py` consumption.
+- [ ] Update the README and operational runbook with profile selection and Pi deployment instructions.
+
+Completing Gate 1 closes these existing backlog items:
+
+- [ ] Update README and supported-platform claims for the validated Raspberry Pi CSI direct-publisher profile; retain the V4L2/FFmpeg profile for USB cameras.
+- [ ] Add a dedicated Pi MediaMTX configuration and a `rpi-csi` publisher profile so `stream_server.py` launches and monitors direct MediaMTX publishing without a second terminal.
+- [ ] Refactor `stream_server.py` around explicit capture/deployment profiles (`rpi-csi`, `v4l2`, `avfoundation`, `dshow`) rather than assuming every publisher has an FFmpeg child process.
+- [ ] Add profile-specific preflight checks. The Pi CSI profile must check Linux ARM64, the `rpicam-*` stack, camera availability, MediaMTX, and the RTSP port; it must not require V4L2 or `libx264`.
+- [ ] Add a systemd deployment unit for the Pi profile to start on boot and restart after failures.
+- [ ] Add unit tests for profile lifecycle and supervisor command-state transitions.
+
+### Gate 2 - Define And Complete MQTT Edge Control
+
+- [ ] Define and document the edge state machine: `offline`, `starting`, `streaming`, `stopping`, `stopped`, and `error`, including valid transitions and failure recovery.
+- [ ] Define the command MVP: `status`, `start`, `stop`, and `restart`; specify payloads, acknowledgements, errors, idempotency, timeouts, and behavior when a continuous or motion-triggered stream is active.
+- [ ] Implement a persistent edge agent/supervisor that remains running while a publisher stops and starts; separate it from the stoppable publisher runtime.
+- [ ] Make the agent control the deployment-profile runtime or service, and publish device-scoped status, heartbeat, and RTSP health events.
+- [ ] Restrict MQTT control to validated commands and schema; never execute arbitrary command strings received from MQTT.
+- [ ] Preserve TLS, per-device topics, authentication, and ACL boundaries already implemented for LAN operation.
+- [ ] Demonstrate controller `stop` -> retained/status `stopped` -> controller `start` -> `streaming` -> cloud RTSP reconnect and recognition event publication.
+- [ ] Add unit tests for command validation and the state machine, plus opt-in integration coverage for authorized control and reconnect behavior.
+
+Completing Gate 2 closes these existing backlog items:
+
+- [ ] Implement a persistent edge supervisor so MQTT `start` and `restart` commands can start or restart a stopped publisher; define and test their interaction with motion-triggered monitoring.
+- [ ] Define the MQTT edge command state machine: states, allowed transitions, command acknowledgement/error payloads, idempotency, and behavior for continuous versus motion-triggered streams.
+- [ ] Implement a persistent edge supervisor/agent, separate from the stoppable publisher runtime, so MQTT `start`, `stop`, `restart`, and `status` commands work consistently across profiles.
+- [ ] Keep MQTT command handling restricted to a validated command whitelist; never execute arbitrary command strings received over MQTT.
+- [ ] Add opt-in integration coverage for Pi boot/service restart, RTSP reconnect, cloud recognition consumption, MQTT status/heartbeat, and authorized MQTT control.
+
 ## P0 - Validate the Production Pipeline
 
 - [x] Run webcam -> RTSP -> MediaPipe -> InsightFace -> FAISS on Windows with a real camera.
@@ -27,7 +71,7 @@
 
 - [x] Accept a custom network RTSP URL in cloud detection and recognition clients.
 - [x] Validate a real-camera RTSP source from Ubuntu Linux ARM64 over the LAN.
-- [ ] Validate RTSP input from Raspberry Pi 4 and Pi Camera.
+- [x] Validate RTSP input from Raspberry Pi 4 and Pi Camera.
 - [ ] Add JSON/API events for external systems.
 - [ ] Upgrade the IoU tracker if long occlusions or crowded crossings become necessary.
 - [ ] Define recording policy, retention, and biometric-data protections before retaining data long term.
@@ -73,7 +117,7 @@
 - [x] Added and validated the Linux ARM64 V4L2 publisher: webcam -> FFmpeg -> MediaMTX -> LAN RTSP -> Windows detection and recognition.
 - [x] Verified Windows cloud consumers reconnect after the Linux ARM64 publisher is restarted.
 - [x] Confirmed stable sustained streaming from the Ubuntu ARM64 VM with the project publisher code.
-- [ ] Validate the separate Raspberry Pi 4 and Pi Camera hardware path.
+- [x] Validate the separate Raspberry Pi 4 and Pi Camera hardware path.
 
 ## 2026-08-02 Progress Notes
 
@@ -129,4 +173,26 @@
 - [ ] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.
 - [ ] Implement a persistent edge supervisor so MQTT `start` and `restart` commands can start or restart a stopped publisher; define and test their interaction with motion-triggered monitoring.
 - [x] Implement the generic motion-triggered edge session controller: MOG2 monitoring, FFmpeg camera handoff, `stream/activity/<device_id>`, 30-second first-face timeout, and 120-second face-presence lease.
-- [ ] Validate motion-triggered handoff and threshold tuning with real Windows/macOS/Linux cameras, then validate the separate Raspberry Pi Camera CSI adapter.
+- [ ] Validate motion-triggered handoff and threshold tuning with real Windows/macOS/Linux cameras, then design and validate a separate Raspberry Pi Camera CSI motion adapter if that mode is required.
+
+## 2026-08-05 Progress Notes
+
+### Completed - Raspberry Pi CSI Direct RTSP Validation
+
+- [x] Validated Raspberry Pi 4 CSI camera publishing directly through MediaMTX v1.19.3 using `source: rpiCamera`, `hardwareH264`, `1280x720`, and `30 FPS`.
+- [x] Confirmed that the direct CSI profile does not need FFmpeg or the V4L2 publisher path: MediaMTX owns camera capture, hardware H.264 encoding, and RTSP publishing.
+- [x] Confirmed that `mediamtx_v1.19.3_linux_arm64.tar.gz` is the correct ARM64 release asset already selected by `scripts/setup_tools.py`.
+- [x] Verified that a cloud client can consume `rtsp://<PI_IP>:8554/camera` through `app.py --source` without application-code changes.
+
+### Still Open - Edge Profiles And MQTT Supervision
+
+- [ ] Update README and supported-platform claims for the validated Raspberry Pi CSI direct-publisher profile; retain the V4L2/FFmpeg profile for USB cameras.
+- [ ] Add a dedicated Pi MediaMTX configuration and a `rpi-csi` publisher profile so `stream_server.py` launches and monitors direct MediaMTX publishing without a second terminal.
+- [ ] Refactor `stream_server.py` around explicit capture/deployment profiles (`rpi-csi`, `v4l2`, `avfoundation`, `dshow`) rather than assuming every publisher has an FFmpeg child process.
+- [ ] Add profile-specific preflight checks. The Pi CSI profile must check Linux ARM64, the `rpicam-*` stack, camera availability, MediaMTX, and the RTSP port; it must not require V4L2 or `libx264`.
+- [ ] Add a systemd deployment unit for the Pi profile to start on boot and restart after failures.
+- [ ] Define the MQTT edge command state machine: states, allowed transitions, command acknowledgement/error payloads, idempotency, and behavior for continuous versus motion-triggered streams.
+- [ ] Implement a persistent edge supervisor/agent, separate from the stoppable publisher runtime, so MQTT `start`, `stop`, `restart`, and `status` commands work consistently across profiles.
+- [ ] Keep MQTT command handling restricted to a validated command whitelist; never execute arbitrary command strings received over MQTT.
+- [ ] Add unit tests for profile lifecycle and supervisor command-state transitions.
+- [ ] Add opt-in integration coverage for Pi boot/service restart, RTSP reconnect, cloud recognition consumption, MQTT status/heartbeat, and authorized MQTT control.
