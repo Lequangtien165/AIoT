@@ -96,6 +96,46 @@ class EdgeSupervisorTests(unittest.TestCase):
         self.supervisor.observe_runtime()
         self.assertEqual(self.supervisor.state, EdgeState.ERROR)
 
+    def test_status_returns_health_without_side_effects(self):
+        ack = self.supervisor.handle(self.command("status", "status-1"))
+        self.assertEqual(ack["result"], "succeeded")
+        self.assertEqual(ack["action"], "status")
+        self.assertEqual(ack["command_id"], "status-1")
+        self.assertEqual(ack["message"], "status returned")
+        status = ack["status"]
+        self.assertEqual(status["state"], "streaming")
+        self.assertEqual(status["mode"], "continuous")
+        self.assertTrue(status["runtime_alive"])
+        self.assertTrue(status["rtsp_healthy"])
+        self.assertEqual(self.start.call_count, 0)
+        self.assertEqual(self.stop.call_count, 0)
+        self.assertEqual(self.supervisor.state, EdgeState.STREAMING)
+
+    def test_status_varies_with_runtime_health(self):
+        self.alive.return_value = False
+        self.healthy.return_value = False
+        ack = self.supervisor.handle(self.command("status", "status-2"))
+        status = ack["status"]
+        self.assertFalse(status["runtime_alive"])
+        self.assertFalse(status["rtsp_healthy"])
+
+    def test_restart_recovers_from_error_state(self):
+        self.supervisor.machine.transition(EdgeState.ERROR)
+        ack = self.supervisor.handle(self.command("restart", "restart-error-1"))
+        self.assertEqual(ack["result"], "succeeded")
+        self.assertEqual(ack["message"], "runtime restarted")
+        self.assertEqual(self.supervisor.state, EdgeState.STREAMING)
+        self.assertFalse(self.stop.called)
+        self.assertEqual(self.start.call_count, 1)
+
+    def test_restart_failure_moves_to_error(self):
+        self.start.side_effect = RuntimeError("boom")
+        self.supervisor.machine.transition(EdgeState.STOPPING)
+        self.supervisor.machine.transition(EdgeState.STOPPED)
+        ack = self.supervisor.handle(self.command("restart", "restart-fail-1"))
+        self.assertEqual(ack["result"], "failed")
+        self.assertEqual(self.supervisor.state, EdgeState.ERROR)
+
 
 if __name__ == "__main__":
     unittest.main()
