@@ -13,6 +13,7 @@ from aiot.mqtt.topics import (
     TOPIC_ERROR_PIPELINE,
     TOPIC_MOTION_DETECTED,
     TOPIC_RECOGNITION_RESULT,
+    control_ack_topic,
     control_stream_topic,
     error_pipeline_topic,
     system_status_topic,
@@ -146,7 +147,9 @@ class MosquittoIntegrationTests(unittest.TestCase):
             edge.subscribe(control_stream_topic("pi4-edge-01"), qos=1)
             edge.connect(timeout=5.0)
             controller = self.connect_client("integration-controller", "aiot-controller", "controller-secret")
-            command = payloads.stream_control(action="stop", target_device_id="pi4-edge-01")
+            command = payloads.stream_control(
+                action="stop", target_device_id="pi4-edge-01", command_id="integration-stop-1"
+            )
             controller.publish(control_stream_topic("pi4-edge-01"), command, qos=1)
 
             self.assertTrue(received_event.wait(5.0))
@@ -156,6 +159,35 @@ class MosquittoIntegrationTests(unittest.TestCase):
                 controller.close()
             if edge is not None:
                 edge.close()
+
+    def test_edge_can_publish_ack_and_controller_can_read_it(self):
+        received = []
+        received_event = threading.Event()
+        edge = self.connect_client("integration-edge-ack", "aiot-edge", "edge-secret")
+        controller = MqttClient(
+            host=self.host,
+            port=self.port,
+            client_id="integration-controller-ack",
+            username="aiot-controller",
+            password="controller-secret",
+            on_message=lambda topic, message: (received.append((topic, message)), received_event.set()),
+        )
+        try:
+            controller.subscribe(control_ack_topic("pi4-edge-01"), qos=1)
+            controller.connect(timeout=5.0)
+            ack = payloads.command_ack(
+                command_id="integration-start-1",
+                target_device_id="pi4-edge-01",
+                action="start",
+                result="succeeded",
+                message="runtime started",
+            )
+            edge.publish(control_ack_topic("pi4-edge-01"), ack, qos=1)
+            self.assertTrue(received_event.wait(5.0))
+            self.assertEqual(received, [(control_ack_topic("pi4-edge-01"), ack)])
+        finally:
+            controller.close()
+            edge.close()
 
 
 if __name__ == "__main__":

@@ -44,6 +44,113 @@ Completing Gate 2 closes these existing backlog items:
 - [ ] Keep MQTT command handling restricted to a validated command whitelist; never execute arbitrary command strings received over MQTT.
 - [ ] Add opt-in integration coverage for Pi boot/service restart, RTSP reconnect, cloud recognition consumption, MQTT status/heartbeat, and authorized MQTT control.
 
+## 2026-08-07 Progress Notes
+
+### In Progress - Persistent MQTT Edge Control
+
+- [x] Added `aiot/streaming/edge_supervisor.py` with the documented `offline`, `starting`, `streaming`, `stopping`, `stopped`, and `error` states, allowed transitions, command whitelist, schema validation, and command-id idempotency.
+- [x] Added `scripts/run_edge_agent.py` as a persistent MQTT agent that supervises a fixed `stream_server.py --no-mqtt` child and publishes retained status, heartbeat metrics, RTSP TCP health, and command acknowledgements.
+- [x] Added `status`, `start`, `stop`, and `restart` command payloads and the device-scoped `control/ack/<device_id>` topic while preserving TLS, authentication, and per-device ACL boundaries.
+- [x] Added unit coverage for command validation, lifecycle transitions, duplicate commands, runtime failure recovery, and broker acknowledgement permissions.
+- [x] Ran the local Mosquitto plus Windows camera demo: authorized controller `stop` returned retained/status `stopped`, `start` returned `streaming` with RTSP health, and `ffprobe` reconnected to H.264 `1280x720` at `30 FPS`.
+- [ ] Validate the complete controller stop -> retained stopped -> start -> streaming -> cloud RTSP reconnect and recognition publication flow on the target edge hardware.
+
+### Gate 2 Local Demo Runbook
+
+Run these commands from the repository root in PowerShell. Keep the Mosquitto container running while testing.
+
+1. Start the local broker and verify it is healthy:
+
+```powershell
+docker compose up -d mosquitto
+docker compose ps
+```
+
+Expected broker port: `127.0.0.1:1883`.
+
+2. Set the demo credentials and start the persistent edge agent. Use the exact camera name discovered by `stream_server.py --list-devices`; on the validated Windows machine it was `Integrated Camera`.
+
+```powershell
+$env:AIOT_EDGE_PASSWORD = 'edge-secret'
+venv\Scripts\python.exe scripts\run_edge_agent.py `
+  --device 'Integrated Camera' `
+  --mqtt-host 127.0.0.1 `
+  --mqtt-port 1883 `
+  --mqtt-client-id pi4-edge-01 `
+  --mqtt-username aiot-edge `
+  --mqtt-password-env AIOT_EDGE_PASSWORD `
+  --heartbeat-interval 1
+```
+
+The agent starts a fixed `stream_server.py --no-mqtt` child, MediaMTX, and FFmpeg. Leave this terminal running.
+
+3. In a second PowerShell terminal, listen for device-scoped acknowledgements:
+
+```powershell
+docker compose exec mosquitto mosquitto_sub `
+  -h 127.0.0.1 -p 1883 `
+  -u aiot-controller -P controller-secret `
+  -t control/ack/pi4-edge-01 -v
+```
+
+Keep that listener running. In a third terminal, send authorized `stop` and `start` commands:
+
+```powershell
+@'
+import json
+import time
+from aiot.mqtt import payloads
+from aiot.mqtt.client import MqttClient
+from aiot.mqtt.topics import control_ack_topic, control_stream_topic
+
+device = "pi4-edge-01"
+client = MqttClient(
+    host="127.0.0.1",
+    port=1883,
+    client_id="demo-controller",
+    username="aiot-controller",
+    password="controller-secret",
+)
+client.connect(timeout=5)
+for action, command_id in (("stop", "demo-stop-001"), ("start", "demo-start-001")):
+    client.publish(
+        control_stream_topic(device),
+        payloads.stream_control(
+            action=action,
+            target_device_id=device,
+            command_id=command_id,
+        ),
+        qos=1,
+    )
+    print(action, "sent", command_id)
+    time.sleep(2)
+client.close()
+'@ | venv\Scripts\python.exe -
+```
+
+Successful responses must contain the same `command_id`, `result: "succeeded"`, and the resulting state. The `stop` response should report `stopped`; the `start` response should report `streaming` with `rtsp_healthy: true`.
+
+4. From a fourth terminal, verify that the restarted RTSP stream is consumable:
+
+```powershell
+& 'tools\ffmpeg\bin\ffprobe.exe' `
+  -v error `
+  -rtsp_transport tcp `
+  -show_entries stream=codec_name,width,height,r_frame_rate `
+  -of json `
+  'rtsp://127.0.0.1:8554/camera'
+```
+
+Expected output includes H.264, `1280` x `720`, and `30/1` FPS.
+
+5. Stop the agent with `Ctrl+C`. If it was launched in the background, stop only the agent and its child `ffmpeg.exe`/`mediamtx.exe` processes so the camera and port `8554` are released. Mosquitto can be stopped separately with:
+
+```powershell
+docker compose down
+```
+
+Verified on 2026-08-07: broker authentication, scoped controller delivery, edge acknowledgement ACLs, retained status behavior, local camera publishing, controller `stop` -> `stopped` -> `start` -> `streaming`, and RTSP reconnect. Not yet verified: cloud `recognize_stream.py` recognition-event publication during the same sequence.
+
 ## P0 - Validate the Production Pipeline
 
 - [x] Run webcam -> RTSP -> MediaPipe -> InsightFace -> FAISS on Windows with a real camera.
