@@ -142,6 +142,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--edge-triggered-session", action="store_true")
     parser.add_argument("--face-presence-interval", type=float, default=15.0)
+    parser.add_argument(
+        "--wanted-config",
+        help="Path to the wanted-person JSON config (default: config/wanted.json).",
+    )
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
@@ -207,27 +211,20 @@ def format_score(score: float | None) -> str:
     return f"{score:.3f}"
 
 
-def is_idoc_label(label: str | None) -> bool:
-    if label is None:
-        return False
-    source_id = label.split(" - ", maxsplit=1)[0]
-    return len(source_id) == 6 and source_id[0] == "A" and source_id[1:].isdigit()
-
-
-def matched_track_color(label: str | None) -> tuple[int, int, int]:
-    if is_idoc_label(label):
+def matched_track_color(wanted: object | None, label: str | None) -> tuple[int, int, int]:
+    if label is not None and wanted is not None and wanted.is_wanted(label):
         return (0, 0, 255)
     return (0, 180, 0)
 
 
-def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool) -> None:
+def draw_tracks(frame: np.ndarray, tracks: list[DisplayTrack], scale: float, stale: bool, wanted=None) -> None:
     for track in tracks:
         x1, y1, x2, y2 = scale_bbox(track.bbox, scale)
         if stale:
             color = (150, 150, 150)
             text = f"#{track.track_id} stale"
         elif track.status == "matched":
-            color = matched_track_color(track.label)
+            color = matched_track_color(wanted, track.label)
             text = f"#{track.track_id} {track.label} {format_score(track.score)}"
         elif track.status == "unknown":
             color = (0, 165, 255)
@@ -645,7 +642,7 @@ def render_recognition_result(
     if result is None:
         return consumed_result_id
     stale = time.monotonic() - result.timestamp > max(0.5, 2.0 / args.recognition_fps)
-    draw_tracks(display_frame, result.tracks, display_scale, stale)
+    draw_tracks(display_frame, result.tracks, display_scale, stale, getattr(args, "wanted", None))
     if result.result_id == consumed_result_id:
         return consumed_result_id
     event_payloads = handle_result_events(result, source_frame, output)
@@ -774,8 +771,11 @@ def main() -> int:
 
     from aiot.recognition.face_engine import FaceEngine
     from aiot.recognition.face_recognizer import FaceRecognizer
+    from aiot.recognition.wanted import WantedList
     from aiot.streaming.stream_output import StreamOutput
     from aiot.tracking.face_tracker import FaceTracker
+
+    args.wanted = WantedList(args.wanted_config)
 
     mqtt_client: MqttClient | None = None
     edge_session = CloudEdgeSession(args.source_device_id) if args.edge_triggered_session else None
