@@ -1,0 +1,24 @@
+[Unit]
+Description=AIoT Raspberry Pi CSI RTSP publisher (MediaMTX direct, no FFmpeg)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=video
+WorkingDirectory=/opt/aiot
+# The Pi user must belong to the video group so libcamera can open the CSI pipeline.
+ExecStart=/opt/aiot/.venv/bin/python /opt/aiot/stream_server.py --profile rpi-csi --no-mqtt
+Restart=always
+RestartSec=5
+# Optional MQTT status/control: uncomment and provide the environment file, e.g.
+#   AIOT_EDGE_PASSWORD=<broker password>
+# ExecStart=/opt/aiot/.venv/bin/python /opt/aiot/stream_server.py --profile rpi-csi \
+#   --mqtt-host <broker> --mqtt-client-id <device_id> --mqtt-username aiot-edge \
+#   --mqtt-password-env AIOT_EDGE_PASSWORD
+# EnvironmentFile=/etc/aiot-edge.env
+# The persistent MQTT agent (scripts/run_edge_agent.py) must not run at the same time.
+
+[Install]
+WantedBy=multi-user.target
