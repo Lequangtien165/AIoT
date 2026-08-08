@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -32,11 +34,21 @@ from aiot.mqtt.topics import (
 )
 from aiot.streaming.edge_session import EdgeSessionController, EdgeSessionState
 from aiot.streaming.motion_detector import MotionDetector
+from aiot.streaming.profiles import (
+    PROFILE_CHOICES,
+    RPI_CSI,
+    ProfileValidationError,
+    list_csi_cameras,
+    preflight,
+    profile_uses_ffmpeg,
+    resolve_profile,
+)
 from aiot.streaming.stream_platform import PlatformConfig, get_platform_config
 from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT, RTSP_URL
 
 PROJECT_ROOT = Path(__file__).parent
 MEDIA_MTX_CONFIG = PROJECT_ROOT / "config" / "mediamtx.yml"
+MEDIA_MTX_RPI_CONFIG = PROJECT_ROOT / "config" / "mediamtx-rpi.yml"
 CONTROL_STREAM_ACTIONS = {"stop", "start", "restart"}
 
 
@@ -53,6 +65,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         help="Camera name on Windows, AVFoundation index on macOS, or /dev/videoN on Linux.",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        help=(
+            "Explicit capture/deployment profile. Auto-detected by default: "
+            "dshow on Windows, avfoundation on macOS, v4l2 on Linux. "
+            "rpi-csi (Raspberry Pi CSI camera, direct MediaMTX publishing) is never "
+            "auto-detected because a Raspberry Pi camera can be CSI or USB/V4L2."
+        ),
     )
     parser.add_argument(
         "--list-devices", action="store_true", help="List available video devices and exit."
@@ -131,28 +153,52 @@ def validate_control_stream_action(message: dict, device_id: str) -> str | None:
     return str(action)
 
 
-def require_tools(config: PlatformConfig) -> bool:
-    missing = [path for path in (config.ffmpeg_path, config.mediamtx_path) if not path.is_file()]
-    if not missing:
-        return True
+def select_mediamtx_config(profile: str) -> Path:
+    """Return the MediaMTX configuration file for a deployment profile."""
+    return MEDIA_MTX_RPI_CONFIG if profile == RPI_CSI else MEDIA_MTX_CONFIG
 
-    print("Missing local tools:", file=sys.stderr)
-    for path in missing:
-        try:
-            display_path = path.relative_to(PROJECT_ROOT)
-        except ValueError:
-            display_path = path
-        print(f"  {display_path}", file=sys.stderr)
-    if config.name == "macos-arm64" and not config.ffmpeg_path.is_file():
-        print("Install FFmpeg with: brew install ffmpeg", file=sys.stderr)
-    elif config.name == "linux-arm64" and not config.ffmpeg_path.is_file():
-        print("Install FFmpeg and V4L2 tools with: sudo apt install -y ffmpeg v4l-utils", file=sys.stderr)
-    print("Run: python scripts/setup_tools.py", file=sys.stderr)
-    return False
+
+def run_preflight(profile: str, config: PlatformConfig, device: str | None) -> int:
+    """Run profile preflight checks, printing any problems. Returns 0 when ready."""
+    problems = preflight(
+        profile,
+        config,
+        device=device,
+        mediamtx_config=select_mediamtx_config(profile),
+    )
+    if not problems:
+        return 0
+    print("Preflight checks failed:", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    return 1
 
 
 def parse_windows_devices(output: str) -> list[CameraDevice]:
-    return [CameraDevice(name, name) for name in re.findall(r'"(.+)" \(video\)', output)]
+    devices: list[CameraDevice] = []
+    in_video_section = False
+    for line in output.splitlines():
+        if "Alternative name" in line or "alternative name" in line:
+            continue
+        # New FFmpeg format tags each device, e.g. "OBS Virtual Camera" (none)
+        # or "Integrated Camera" (video); audio devices are tagged (audio).
+        match = re.search(r'"(.+)" \((?:video|none)\)', line)
+        if match:
+            devices.append(CameraDevice(match.group(1), match.group(1)))
+            continue
+        if "video devices" in line:
+            in_video_section = True
+            continue
+        if "audio devices" in line or "(audio)" in line:
+            in_video_section = False
+            continue
+        # Legacy format prints bare quoted names between the video and audio
+        # section headers, e.g. "Integrated Camera" on its own line.
+        if in_video_section:
+            match = re.search(r'"(.+)"', line)
+            if match:
+                devices.append(CameraDevice(match.group(1), match.group(1)))
+    return devices
 
 
 def parse_macos_devices(output: str) -> list[CameraDevice]:
@@ -321,6 +367,23 @@ def build_ffmpeg_command(args: argparse.Namespace, config: PlatformConfig) -> li
     return command
 
 
+def request_stop(signum, frame) -> None:
+    """Convert SIGTERM into KeyboardInterrupt so publisher cleanup always runs.
+
+    The motion-triggered loop clears the stop flag after a session, so a
+    flag-only handler would not terminate the process. Raising
+    KeyboardInterrupt propagates through both the continuous and the
+    motion-triggered loops into the existing handler in main().
+    """
+    raise KeyboardInterrupt
+
+
+def install_signal_handlers() -> None:
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is not None:
+        signal.signal(sigterm, request_stop)
+
+
 def wait_for_rtsp_server(process: subprocess.Popen[bytes]) -> bool:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -345,7 +408,11 @@ def stop_process(process: subprocess.Popen[bytes] | None) -> None:
         process.wait()
 
 
-def resolve_device(args: argparse.Namespace, config: PlatformConfig) -> int | None:
+def resolve_device(args: argparse.Namespace, config: PlatformConfig, profile: str) -> int | None:
+    if profile == RPI_CSI:
+        if args.list_devices:
+            return list_csi_cameras()
+        return None
     if args.list_devices:
         return list_devices(config)
     if args.device:
@@ -503,7 +570,7 @@ def monitor_publisher(
                 ),
             )
             return 1
-        if ffmpeg.poll() is not None:
+        if ffmpeg is not None and ffmpeg.poll() is not None:
             print(
                 "FFmpeg stopped unexpectedly. Check the FFmpeg error above for an "
                 "invalid device name, busy camera, unsupported frame rate/size, encoder "
@@ -527,6 +594,12 @@ def monitor_publisher(
         now = time.monotonic()
         if now - last_heartbeat >= args.heartbeat_interval:
             last_heartbeat = now
+            metrics: dict[str, object] = {
+                "rtsp_url": RTSP_URL,
+                "mediamtx_pid": mediamtx.pid,
+            }
+            if ffmpeg is not None:
+                metrics["ffmpeg_pid"] = ffmpeg.pid
             publish_mqtt(
                 mqtt_client,
                 system_status_topic(args.mqtt_client_id),
@@ -534,11 +607,7 @@ def monitor_publisher(
                     device_id=args.mqtt_client_id,
                     component="rtsp-publisher",
                     state="running",
-                    metrics={
-                        "rtsp_url": RTSP_URL,
-                        "mediamtx_pid": mediamtx.pid,
-                        "ffmpeg_pid": ffmpeg.pid,
-                    },
+                    metrics=metrics,
                 ),
             )
         time.sleep(0.25)
@@ -546,14 +615,28 @@ def monitor_publisher(
 
 def main() -> int:
     args = parse_args()
+    install_signal_handlers()
     try:
         config = get_platform_config()
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 1
-    if not require_tools(config):
+    try:
+        profile = resolve_profile(args.profile, platform.system(), platform.machine())
+    except ProfileValidationError as error:
+        print(error, file=sys.stderr)
         return 1
-    device_status = resolve_device(args, config)
+    if args.motion_triggered and profile == RPI_CSI:
+        print(
+            "--motion-triggered is not supported with the rpi-csi profile: "
+            "MediaMTX owns the camera through libcamera while motion detection "
+            "needs an OpenCV/V4L2 device. Use the v4l2 profile with a USB camera.",
+            file=sys.stderr,
+        )
+        return 1
+    if run_preflight(profile, config, args.device) != 0:
+        return 1
+    device_status = resolve_device(args, config, profile)
     if device_status is not None:
         return device_status
 
@@ -569,7 +652,8 @@ def main() -> int:
     ffmpeg: subprocess.Popen[bytes] | None = None
 
     try:
-        mediamtx = subprocess.Popen([str(config.mediamtx_path), str(MEDIA_MTX_CONFIG)])
+        mediamtx_config = select_mediamtx_config(profile)
+        mediamtx = subprocess.Popen([str(config.mediamtx_path), str(mediamtx_config)])
         if not wait_for_rtsp_server(mediamtx):
             print("MediaMTX did not start on 127.0.0.1:8554.", file=sys.stderr)
             publish_mqtt(
@@ -585,8 +669,9 @@ def main() -> int:
 
         if args.motion_triggered:
             return run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session)
-        ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
-        print(f"Publishing webcam at {RTSP_URL}")
+        if profile_uses_ffmpeg(profile):
+            ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
+        print(f"Publishing webcam at {RTSP_URL} (profile: {profile})")
         print("Press Ctrl+C to stop.")
         publish_mqtt(
             mqtt_client,
@@ -597,6 +682,7 @@ def main() -> int:
                 state="running",
                 metrics={
                     "rtsp_url": RTSP_URL,
+                    "profile": profile,
                     "video_size": args.video_size,
                     "framerate": args.framerate,
                     "bitrate": args.bitrate,
