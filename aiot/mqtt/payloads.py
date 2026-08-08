@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
@@ -132,14 +133,35 @@ def stream_control(
     target_device_id: str,
     requested_by: str = "cloud",
     parameters: dict[str, Any] | None = None,
+    command_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "ts_ms": now_ms(),
+        "command_id": command_id or uuid.uuid4().hex,
         "requested_by": requested_by,
         "target_device_id": target_device_id,
         "action": action,
         "parameters": redact_sensitive_values(parameters or {}),
+    }
+
+
+def command_ack(
+    *,
+    command_id: str,
+    target_device_id: str,
+    action: str,
+    result: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ts_ms": now_ms(),
+        "command_id": command_id,
+        "target_device_id": target_device_id,
+        "action": action,
+        "result": result,
+        "message": message,
     }
 
 

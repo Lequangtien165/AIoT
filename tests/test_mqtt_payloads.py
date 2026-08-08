@@ -19,6 +19,7 @@ from aiot.mqtt.topics import (
     TOPIC_MOTION_DETECTED,
     TOPIC_RECOGNITION_RESULT,
     TOPIC_SYSTEM_STATUS,
+    control_ack_topic,
     control_stream_topic,
     error_pipeline_topic,
     stream_activity_topic,
@@ -80,6 +81,18 @@ class PayloadBuilderTests(unittest.TestCase):
         message = payloads.stream_control(action="stop", target_device_id="edge-1")
 
         self.assertEqual(message["target_device_id"], "edge-1")
+        self.assertTrue(message["command_id"])
+
+    def test_command_ack_and_ack_topic_are_device_scoped(self):
+        message = payloads.command_ack(
+            command_id="cmd-1",
+            target_device_id="edge-1",
+            action="status",
+            result="succeeded",
+            message="status returned",
+        )
+        self.assertEqual(message["command_id"], "cmd-1")
+        self.assertEqual(control_ack_topic("edge-1"), "control/ack/edge-1")
 
     def test_face_presence_has_session_and_face_count(self):
         message = payloads.face_presence(device_id="edge-1", stream_session_id="session-1", face_count=1)
