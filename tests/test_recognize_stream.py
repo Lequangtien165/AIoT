@@ -1,4 +1,6 @@
 import unittest
+import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -6,6 +8,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from aiot.recognition.face_engine import FaceDetection, FaceEmbedding
+from aiot.recognition.wanted import WantedList
 from aiot.tracking.face_tracker import TrackAssignment
 from recognize_stream import (
     DisplayTrack,
@@ -15,7 +18,6 @@ from recognize_stream import (
     RecognitionWorker,
     StreamFrame,
     handle_result_events,
-    is_idoc_label,
     matched_track_color,
     parse_args,
     render_recognition_result,
@@ -90,13 +92,29 @@ class ScaleBBoxTests(unittest.TestCase):
 
 
 class MatchedTrackColorTests(unittest.TestCase):
-    def test_idoc_label_uses_red_box(self):
-        self.assertTrue(is_idoc_label("A00147 - Male"))
-        self.assertEqual(matched_track_color("A00147 - Male"), (0, 0, 255))
+    def _wanted(self, pattern: str) -> WantedList:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "wanted.json"
+            config_path.write_text(
+                json.dumps({"schema_version": 1, "wanted": [{"match": pattern}]}),
+                encoding="utf-8",
+            )
+            return WantedList(config_path)
+
+    def test_wanted_label_uses_red_box(self):
+        wanted = self._wanted(r"^A\d{5}( - |$)")
+
+        self.assertTrue(wanted.is_wanted("A00147 - Male"))
+        self.assertEqual(matched_track_color(wanted, "A00147 - Male"), (0, 0, 255))
 
     def test_regular_label_uses_green_box(self):
-        self.assertFalse(is_idoc_label("Alice"))
-        self.assertEqual(matched_track_color("Alice"), (0, 180, 0))
+        wanted = self._wanted(r"^A\d{5}( - |$)")
+
+        self.assertFalse(wanted.is_wanted("Alice"))
+        self.assertEqual(matched_track_color(wanted, "Alice"), (0, 180, 0))
+
+    def test_missing_wanted_list_keeps_green_box(self):
+        self.assertEqual(matched_track_color(None, "A00147 - Male"), (0, 180, 0))
 
 
 class SnapshotTracksTests(unittest.TestCase):
@@ -313,7 +331,7 @@ class DisplayLoopTests(unittest.TestCase):
         )
 
         self.assertEqual(consumed, 4)
-        draw_tracks.assert_called_once_with(display_frame, [self.track], 1.0, False)
+        draw_tracks.assert_called_once_with(display_frame, [self.track], 1.0, False, None)
         handle_events.assert_called_once_with(self.result, self.frame, output)
         self.assertEqual(publish_mqtt.call_args.args[1], "recognition/result")
         self.assertEqual(publish_mqtt.call_args.args[2]["result_id"], 4)
