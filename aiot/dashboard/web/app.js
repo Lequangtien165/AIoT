@@ -68,7 +68,7 @@ function wantedName(label) {
     return label;
   }
   const entry = wantedCache.get(label);
-  return entry && entry.name ? entry.name : label;
+  return entry?.name || label;
 }
 
 async function refreshWanted(label) {

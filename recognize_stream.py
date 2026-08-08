@@ -719,16 +719,9 @@ def render_next_frame(
     source_fps: float,
     output,
     mqtt_client,
-    reader: LatestFrameReader,
-    worker: RecognitionWorker,
     consumed_result_id: int,
-    display_frames: int,
-    last_capture_frames: int,
-    last_recognition_frames: int,
-    last_display_frames: int,
-    last_profile_time: float,
-) -> tuple[int, int, int, int, int, float]:
-    """Render one frame's recognition result and update display/profile counters."""
+) -> int:
+    """Render one frame's recognition result; returns the consumed result id."""
     display_frame, display_scale = resize_for_display(source_frame, 1280)
     if display_frame is source_frame:
         display_frame = display_frame.copy()
@@ -744,25 +737,7 @@ def render_next_frame(
     )
     output.write_frame(display_frame, source_fps)
     cv2.imshow(WINDOW_TITLE, display_frame)
-    display_frames += 1
-    last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = update_profile(
-        args,
-        reader,
-        worker,
-        display_frames,
-        last_capture_frames,
-        last_recognition_frames,
-        last_display_frames,
-        last_profile_time,
-    )
-    return (
-        consumed_result_id,
-        display_frames,
-        last_capture_frames,
-        last_recognition_frames,
-        last_display_frames,
-        last_profile_time,
-    )
+    return consumed_result_id
 
 
 def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker, output, mqtt_client) -> None:
@@ -789,23 +764,20 @@ def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker,
             continue
         last_rendered_frame_id = stream_frame.frame_id
         last_rendered_result_id = result_id
-        (
-            consumed_result_id,
-            display_frames,
-            last_capture_frames,
-            last_recognition_frames,
-            last_display_frames,
-            last_profile_time,
-        ) = render_next_frame(
+        consumed_result_id = render_next_frame(
             args,
             result,
             stream_frame.frame,
             stream_frame.source_fps,
             output,
             mqtt_client,
+            consumed_result_id,
+        )
+        display_frames += 1
+        last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = update_profile(
+            args,
             reader,
             worker,
-            consumed_result_id,
             display_frames,
             last_capture_frames,
             last_recognition_frames,
