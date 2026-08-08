@@ -210,16 +210,14 @@ class MosquittoIntegrationTests(unittest.TestCase):
     def test_edge_publish_to_control_topic_is_rejected(self):
         edge = self.connect_client("integration-edge-denied", "aiot-edge", "edge-secret")
         try:
+            topic = control_stream_topic("pi4-edge-01")
+            message = payloads.stream_control(
+                action="stop",
+                target_device_id="pi4-edge-01",
+                command_id="integration-denied-1",
+            )
             with self.assertRaises(MqttPublishError):
-                edge.publish(
-                    control_stream_topic("pi4-edge-01"),
-                    payloads.stream_control(
-                        action="stop",
-                        target_device_id="pi4-edge-01",
-                        command_id="integration-denied-1",
-                    ),
-                    qos=1,
-                )
+                edge.publish(topic, message, qos=1)
         finally:
             edge.close()
 

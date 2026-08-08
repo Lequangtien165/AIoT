@@ -83,42 +83,58 @@ def _validate_common_payload(payload: dict[str, Any]) -> None:
         raise ValueError("Audit field ts_ms must be a non-negative integer.")
 
 
+def _validate_recognition_payload(payload: dict[str, Any]) -> None:
+    _require_non_empty_string(payload, "source")
+    for field in ("frame_id", "result_id"):
+        if not _is_non_negative_integer(payload.get(field)):
+            raise ValueError(f"Audit field {field} must be a non-negative integer.")
+    latency_ms = payload.get("latency_ms")
+    if (
+        not isinstance(latency_ms, (int, float))
+        or isinstance(latency_ms, bool)
+        or not math.isfinite(latency_ms)
+        or latency_ms < 0
+    ):
+        raise ValueError("Audit field latency_ms must be a non-negative finite number.")
+    for field in ("tracks", "events"):
+        if not isinstance(payload.get(field), list) or not all(isinstance(item, dict) for item in payload[field]):
+            raise ValueError(f"Audit field {field} must be a list of objects.")
+
+
+def _validate_motion_payload(payload: dict[str, Any]) -> None:
+    _require_non_empty_string(payload, "device_id")
+    _require_non_empty_string(payload, "sensor_id")
+    if not isinstance(payload.get("active"), bool):
+        raise ValueError("Audit field active must be a boolean.")
+
+
+def _validate_control_ack_payload(payload: dict[str, Any]) -> None:
+    for field in ("command_id", "target_device_id", "action", "result"):
+        _require_non_empty_string(payload, field)
+    if not isinstance(payload.get("message"), str):
+        raise ValueError("Audit field message must be a string.")
+    if payload.get("state") is not None and not isinstance(payload["state"], str):
+        raise ValueError("Audit field state must be a string or null.")
+
+
+def _validate_error_payload(payload: dict[str, Any]) -> None:
+    _require_non_empty_string(payload, "component")
+    _require_non_empty_string(payload, "message")
+    if payload.get("source") is not None and not isinstance(payload["source"], str):
+        raise ValueError("Audit field source must be a string or null.")
+    if payload.get("details", {}) is not None and not isinstance(payload.get("details", {}), dict):
+        raise ValueError("Audit field details must be an object.")
+
+
 def _validate_topic_payload(topic: str, payload: dict[str, Any]) -> None:
     if topic == "recognition/result":
-        _require_non_empty_string(payload, "source")
-        for field in ("frame_id", "result_id"):
-            if not _is_non_negative_integer(payload.get(field)):
-                raise ValueError(f"Audit field {field} must be a non-negative integer.")
-        latency_ms = payload.get("latency_ms")
-        if (
-            not isinstance(latency_ms, (int, float))
-            or isinstance(latency_ms, bool)
-            or not math.isfinite(latency_ms)
-            or latency_ms < 0
-        ):
-            raise ValueError("Audit field latency_ms must be a non-negative finite number.")
-        for field in ("tracks", "events"):
-            if not isinstance(payload.get(field), list) or not all(isinstance(item, dict) for item in payload[field]):
-                raise ValueError(f"Audit field {field} must be a list of objects.")
+        _validate_recognition_payload(payload)
     elif topic == "motion/detected":
-        _require_non_empty_string(payload, "device_id")
-        _require_non_empty_string(payload, "sensor_id")
-        if not isinstance(payload.get("active"), bool):
-            raise ValueError("Audit field active must be a boolean.")
+        _validate_motion_payload(payload)
     elif topic.startswith("control/ack/"):
-        for field in ("command_id", "target_device_id", "action", "result"):
-            _require_non_empty_string(payload, field)
-        if not isinstance(payload.get("message"), str):
-            raise ValueError("Audit field message must be a string.")
-        if payload.get("state") is not None and not isinstance(payload["state"], str):
-            raise ValueError("Audit field state must be a string or null.")
+        _validate_control_ack_payload(payload)
     elif topic.startswith("error/"):
-        _require_non_empty_string(payload, "component")
-        _require_non_empty_string(payload, "message")
-        if payload.get("source") is not None and not isinstance(payload["source"], str):
-            raise ValueError("Audit field source must be a string or null.")
-        if payload.get("details", {}) is not None and not isinstance(payload.get("details", {}), dict):
-            raise ValueError("Audit field details must be an object.")
+        _validate_error_payload(payload)
 
 
 def resolve_audit_db_path(path: str | Path | None = None) -> Path:

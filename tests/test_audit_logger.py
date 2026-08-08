@@ -67,6 +67,12 @@ class ControlAckAuditTests(unittest.TestCase):
             with patch("aiot.mqtt.audit_logger.AUDIT_DB_DIR", database_dir):
                 store = AuditStore(database_dir / "audit.sqlite3")
                 try:
+                    topic = control_ack_topic("pi4-edge-01")
+
+                    def assert_rejected(payload):
+                        with self.assertRaises(ValueError):
+                            store.record(topic, payload)
+
                     invalid_cases = [
                         valid_ack(command_id=""),
                         valid_ack(target_device_id=None),
@@ -77,8 +83,7 @@ class ControlAckAuditTests(unittest.TestCase):
                         valid_ack(schema_version=2),
                     ]
                     for payload in invalid_cases:
-                        with self.assertRaises(ValueError):
-                            store.record(control_ack_topic("pi4-edge-01"), payload)
+                        assert_rejected(payload)
                 finally:
                     store.close()
 
