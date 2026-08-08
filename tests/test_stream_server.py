@@ -1,22 +1,35 @@
 import argparse
+import signal
 import subprocess
-from unittest.mock import Mock, patch
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
+from unittest.mock import Mock, patch
 
+import stream_server
 from aiot.streaming.stream_platform import get_platform_config
 from aiot.mqtt import payloads
 from aiot.mqtt.topics import control_stream_topic, system_status_topic, error_rtsp_topic
 from stream_server import (
+    MEDIA_MTX_CONFIG,
+    MEDIA_MTX_RPI_CONFIG,
     CameraDevice,
     RTSP_URL,
     build_ffmpeg_command,
     choose_device,
     get_video_devices,
+    install_signal_handlers,
+    main,
     monitor_publisher,
     parse_args,
     parse_linux_devices,
     parse_macos_devices,
+    parse_windows_devices,
     publish_mqtt,
+    request_stop,
+    resolve_device,
+    run_preflight,
+    select_mediamtx_config,
     validate_control_stream_action,
 )
 
@@ -140,6 +153,70 @@ class FfmpegCommandTests(unittest.TestCase):
         self.assertNotIn("-prio_speed", command)
 
 
+class WindowsParserTests(unittest.TestCase):
+    def test_new_format_accepts_video_and_none_tags(self):
+        output = (
+            '[in#0 @ 0x1] "OBS Virtual Camera" (none)\n'
+            '[in#0 @ 0x2] "Integrated Camera" (video)\n'
+        )
+
+        devices = parse_windows_devices(output)
+
+        self.assertEqual(
+            devices,
+            [
+                CameraDevice("OBS Virtual Camera", "OBS Virtual Camera"),
+                CameraDevice("Integrated Camera", "Integrated Camera"),
+            ],
+        )
+
+    def test_new_format_excludes_audio_devices(self):
+        output = (
+            '[in#0 @ 0x1] "Integrated Camera" (video)\n'
+            '[in#0 @ 0x2] "Microphone" (audio)\n'
+        )
+
+        devices = parse_windows_devices(output)
+
+        self.assertEqual(devices, [CameraDevice("Integrated Camera", "Integrated Camera")])
+
+    def test_new_format_ignores_alternative_names(self):
+        output = (
+            '[in#0 @ 0x1] "Integrated Camera" (video)\n'
+            '[in#0 @ 0x1]   Alternative name "@device_sw_{860BB310}"\n'
+        )
+
+        devices = parse_windows_devices(output)
+
+        self.assertEqual(devices, [CameraDevice("Integrated Camera", "Integrated Camera")])
+
+    def test_legacy_format_uses_video_section_headers(self):
+        output = """DirectShow video devices (some may be both video and audio devices)
+ "Integrated Camera"
+    Alternative name "@device_pnp_\\\\?\\usb#vid_0bda"
+DirectShow audio devices
+ "Microphone"
+"""
+
+        devices = parse_windows_devices(output)
+
+        self.assertEqual(devices, [CameraDevice("Integrated Camera", "Integrated Camera")])
+
+    @patch("stream_server.subprocess.run")
+    def test_windows_listing_succeeds_when_devices_are_parsed(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout='[in#0 @ 0x1] "Integrated Camera" (video)\n',
+        )
+
+        devices, status, _ = get_video_devices(get_platform_config("Windows", "AMD64"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(devices, [CameraDevice("Integrated Camera", "Integrated Camera")])
+        self.assertIn("-list_devices", run.call_args.args[0])
+
+
 class DeviceSelectionTests(unittest.TestCase):
     @patch("stream_server.sys.stdin.isatty", return_value=True)
     @patch("builtins.input", return_value="2")
@@ -239,6 +316,37 @@ class LinuxDeviceTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["v4l2-ctl", "--list-devices"])
 
 
+class MosquittoConfigTests(unittest.TestCase):
+    def test_mosquitto_config_files_use_lf_line_endings(self):
+        config_dir = stream_server.PROJECT_ROOT / "config" / "mosquitto"
+        for name in ("mosquitto.conf", "mosquitto-tls.conf", "aclfile", "passwords.example"):
+            path = config_dir / name
+            self.assertTrue(path.is_file(), f"missing {name}")
+            data = path.read_bytes()
+            self.assertNotIn(
+                b"\r\n",
+                data,
+                f"{name} must use LF line endings; CRLF breaks Mosquitto ACL pattern matching",
+            )
+
+
+class SignalHandlerTests(unittest.TestCase):
+    def test_request_stop_raises_keyboard_interrupt_for_cleanup(self):
+        with self.assertRaises(KeyboardInterrupt):
+            request_stop(signal.SIGTERM, None)
+
+    @patch("stream_server.signal.signal")
+    def test_install_signal_handlers_registers_sigterm(self, signal_signal):
+        install_signal_handlers()
+        signal_signal.assert_called_once_with(signal.SIGTERM, request_stop)
+
+    @patch("stream_server.signal.signal")
+    def test_install_signal_handlers_is_safe_without_sigterm(self, signal_signal):
+        with patch.object(stream_server.signal, "SIGTERM", None, create=True):
+            install_signal_handlers()
+        signal_signal.assert_not_called()
+
+
 class PublisherMonitorTests(unittest.TestCase):
     def setUp(self):
         self.args = argparse.Namespace(heartbeat_interval=5.0, mqtt_client_id="edge-test")
@@ -305,6 +413,117 @@ class PublisherMonitorTests(unittest.TestCase):
             {"rtsp_url": RTSP_URL, "mediamtx_pid": 101, "ffmpeg_pid": 202},
         )
         sleep.assert_called_once_with(0.25)
+
+
+class ProfileWiringTests(unittest.TestCase):
+    def test_select_mediamtx_config_uses_rpi_config_for_csi(self):
+        self.assertEqual(select_mediamtx_config("rpi-csi"), MEDIA_MTX_RPI_CONFIG)
+        self.assertEqual(select_mediamtx_config("v4l2"), MEDIA_MTX_CONFIG)
+        self.assertEqual(select_mediamtx_config("dshow"), MEDIA_MTX_CONFIG)
+        self.assertEqual(select_mediamtx_config("avfoundation"), MEDIA_MTX_CONFIG)
+
+    @patch("sys.argv", ["stream_server.py", "--device", "Camera A", "--profile", "rpi-csi"])
+    def test_parse_args_accepts_explicit_profile(self):
+        args = parse_args()
+        self.assertEqual(args.profile, "rpi-csi")
+
+    @patch("sys.argv", ["stream_server.py", "--device", "Camera A", "--profile", "bogus"])
+    def test_parse_args_rejects_unknown_profile(self):
+        with self.assertRaises(SystemExit):
+            parse_args()
+
+    @patch("stream_server.preflight", return_value=[])
+    def test_run_preflight_returns_zero_when_ready(self, preflight):
+        config = get_platform_config("Windows", "AMD64")
+
+        self.assertEqual(run_preflight("dshow", config, "Camera A"), 0)
+        preflight.assert_called_once()
+        self.assertEqual(preflight.call_args.kwargs["device"], "Camera A")
+
+    @patch("stream_server.preflight", return_value=["FFmpeg was not found."])
+    def test_run_preflight_prints_problems_and_fails(self, preflight):
+        config = get_platform_config("Windows", "AMD64")
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(run_preflight("dshow", config, None), 1)
+        self.assertIn("FFmpeg was not found", stderr.getvalue())
+
+
+class PublisherMonitorNoFfmpegTests(unittest.TestCase):
+    """The rpi-csi profile publishes directly through MediaMTX with no FFmpeg child."""
+
+    def setUp(self):
+        self.args = argparse.Namespace(heartbeat_interval=5.0, mqtt_client_id="edge-test")
+        self.mediamtx = Mock(pid=101)
+        self.stop_requested = Mock()
+        self.client = Mock()
+
+    @patch("stream_server.publish_mqtt")
+    def test_mediamtx_exit_is_detected_without_ffmpeg_child(self, publish_mqtt):
+        self.mediamtx.poll.return_value = 3
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, None, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(publish_mqtt.call_args.args[1], "error/rtsp/edge-test")
+
+    @patch("stream_server.time.sleep")
+    @patch("stream_server.time.monotonic", side_effect=[5.0])
+    @patch("stream_server.publish_mqtt")
+    def test_heartbeat_omits_ffmpeg_pid_without_ffmpeg_child(self, publish_mqtt, _monotonic, sleep):
+        self.mediamtx.poll.return_value = None
+        self.stop_requested.is_set.side_effect = [False, True]
+
+        result = monitor_publisher(
+            self.args, self.mediamtx, None, self.stop_requested, self.client
+        )
+
+        self.assertEqual(result, 0)
+        metrics = publish_mqtt.call_args.args[2]["metrics"]
+        self.assertEqual(metrics["mediamtx_pid"], 101)
+        self.assertNotIn("ffmpeg_pid", metrics)
+
+
+class RpiCsiDeviceTests(unittest.TestCase):
+    @patch("stream_server.list_csi_cameras", return_value=0)
+    def test_list_devices_uses_camera_tool(self, list_csi):
+        args = argparse.Namespace(list_devices=True)
+
+        self.assertEqual(
+            resolve_device(args, get_platform_config("Linux", "aarch64"), "rpi-csi"), 0
+        )
+        list_csi.assert_called_once()
+
+    def test_regular_run_skips_device_resolution(self):
+        args = argparse.Namespace(list_devices=False)
+
+        self.assertIsNone(
+            resolve_device(args, get_platform_config("Linux", "aarch64"), "rpi-csi")
+        )
+
+
+class MainProfileGateTests(unittest.TestCase):
+    @patch("stream_server.platform.machine", return_value="AMD64")
+    @patch("stream_server.platform.system", return_value="Linux")
+    @patch("sys.argv", ["stream_server.py", "--profile", "rpi-csi"])
+    def test_main_rejects_rpi_csi_on_wrong_architecture(self, _system, _machine):
+        self.assertEqual(main(), 1)
+
+    @patch("stream_server.platform.machine", return_value="aarch64")
+    @patch("stream_server.platform.system", return_value="Linux")
+    @patch("stream_server.run_preflight", return_value=0)
+    @patch("sys.argv", ["stream_server.py", "--profile", "rpi-csi", "--motion-triggered"])
+    def test_main_rejects_motion_triggered_with_rpi_csi(self, _preflight, _system, _machine):
+        self.assertEqual(main(), 1)
+
+    @patch("stream_server.platform.machine", return_value="AMD64")
+    @patch("stream_server.platform.system", return_value="Windows")
+    @patch("stream_server.run_preflight", return_value=1)
+    @patch("sys.argv", ["stream_server.py", "--device", "Camera A"])
+    def test_main_exits_when_preflight_fails(self, _preflight, _system, _machine):
+        self.assertEqual(main(), 1)
 
 
 if __name__ == "__main__":

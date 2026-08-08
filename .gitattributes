@@ -1,0 +1,9 @@
+# Mosquitto config is consumed by the Linux container; CRLF line endings
+# break ACL pattern matching, so force LF on checkout even on Windows.
+config/mosquitto/* text eol=lf
+
+# The systemd unit is deployed to a Linux Raspberry Pi; CRLF breaks ExecStart.
+deploy/systemd/* text eol=lf
+config/mediamtx.yml
+config/mediamtx-rpi.yml
+config/wanted.json
