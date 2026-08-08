@@ -23,8 +23,6 @@ const el = {
 
 const state = {
   statuses: {},
-  wantedPatterns: [],
-  wantedNames: [],
   tracks: {},
   entries: [],
   seq: 0,
@@ -34,6 +32,9 @@ const state = {
   ws: null,
   pc: null,
 };
+
+const wantedCache = new Map();
+const wantedInflight = new Set();
 
 const ALARM_TTL_MS = 8000;
 const ALARM_COOLDOWN_MS = 30000;
@@ -52,12 +53,37 @@ function formatTime(tsMs, receivedAt) {
 }
 
 function isWanted(label) {
-  return state.wantedPatterns.some((re) => re.test(label));
+  if (!label) return false;
+  if (!wantedCache.has(label)) {
+    refreshWanted(label);
+    return false;
+  }
+  return wantedCache.get(label) !== null;
 }
 
 function wantedName(label) {
-  const index = state.wantedPatterns.findIndex((re) => re.test(label));
-  return index >= 0 ? state.wantedNames[index] : label;
+  if (!label) return label;
+  if (!wantedCache.has(label)) {
+    refreshWanted(label);
+    return label;
+  }
+  const entry = wantedCache.get(label);
+  return entry && entry.name ? entry.name : label;
+}
+
+async function refreshWanted(label) {
+  if (wantedInflight.has(label) || wantedCache.has(label)) return;
+  wantedInflight.add(label);
+  try {
+    const response = await fetch(`/api/wanted/match?label=${encodeURIComponent(label)}`);
+    if (!response.ok) return;
+    const body = await response.json();
+    wantedCache.set(label, body.wanted ? body.entry : null);
+  } catch {
+    wantedCache.set(label, null);
+  } finally {
+    wantedInflight.delete(label);
+  }
 }
 
 function setVideoStatus(text) {
@@ -74,7 +100,7 @@ function ensureAudioContext() {
     const Ctor = window.AudioContext || window.webkitAudioContext;
     if (Ctor) audioContext = new Ctor();
   }
-  if (audioContext && audioContext.state === "suspended") audioContext.resume();
+  if (audioContext?.state === "suspended") audioContext.resume();
 }
 
 function beep() {
@@ -246,30 +272,35 @@ function classify(topic, payload) {
   if (topic.startsWith("error/")) return "error";
   if (topic === "motion/detected") return "motion";
   if (topic === "recognition/result") {
-    const kinds = (payload.events || []).map((event) => event.kind);
-    if (kinds.includes("identity_confirmed") || kinds.includes("identity_changed")) return "match";
-    if (kinds.includes("unknown")) return "unknown";
+    const kinds = new Set((payload.events || []).map((event) => event.kind));
+    if (kinds.has("identity_confirmed") || kinds.has("identity_changed")) return "match";
+    if (kinds.has("unknown")) return "unknown";
     return "recognition";
   }
   return "other";
 }
 
-function entryTitle(topic, payload) {
-  if (topic.startsWith("control/ack")) {
-    return `${payload.action} → ${payload.result}${payload.state ? ` (${payload.state})` : ""}`;
+function ackTitle(payload) {
+  const stateSuffix = payload.state ? ` (${payload.state})` : "";
+  return `${payload.action} → ${payload.result}${stateSuffix}`;
+}
+
+function recognitionTitle(payload) {
+  const events = payload.events || [];
+  if (!events.length) return `recognition (${(payload.tracks || []).length} tracks)`;
+  const first = events[0];
+  if (first.kind === "identity_confirmed") {
+    return `MATCH ${first.label} ${first.score ? first.score.toFixed(3) : ""}`;
   }
+  if (first.kind === "identity_changed") return `IDENTITY CHANGED → ${first.label}`;
+  return `UNKNOWN track=${first.track_id}`;
+}
+
+function entryTitle(topic, payload) {
+  if (topic.startsWith("control/ack")) return ackTitle(payload);
   if (topic.startsWith("error/")) return `error: ${payload.message || topic}`;
   if (topic === "motion/detected") return `motion ${payload.active ? "detected" : "cleared"}`;
-  if (topic === "recognition/result") {
-    const events = payload.events || [];
-    if (events.length) {
-      const first = events[0];
-      if (first.kind === "identity_confirmed") return `MATCH ${first.label} ${first.score ? first.score.toFixed(3) : ""}`;
-      if (first.kind === "identity_changed") return `IDENTITY CHANGED → ${first.label}`;
-      return `UNKNOWN track=${first.track_id}`;
-    }
-    return `recognition (${(payload.tracks || []).length} tracks)`;
-  }
+  if (topic === "recognition/result") return recognitionTitle(payload);
   return topic;
 }
 
@@ -380,6 +411,31 @@ function handleRecognitionEvents(payload) {
   }
 }
 
+function trackColor(status, wanted) {
+  if (status === "matched") return wanted ? "#ff1744" : "#2ecc71";
+  if (status === "unknown") return "#ff9800";
+  return "#ffd54f";
+}
+
+function drawTrack(ctx, track, scaleX, scaleY, now) {
+  const [x1, y1, x2, y2] = track.bbox;
+  const wanted = track.label && isWanted(track.label);
+  const color = trackColor(track.status, wanted);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = wanted ? 4 : 2;
+  ctx.globalAlpha = wanted ? 0.55 + 0.45 * Math.abs(Math.sin(now / 180)) : 1;
+  ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+  ctx.globalAlpha = 1;
+  const score = track.score != null ? ` ${track.score.toFixed(3)}` : "";
+  const label = `${track.label || "UNKNOWN"}${score}`;
+  const textWidth = ctx.measureText(label).width;
+  const textY = Math.max(0, y1 * scaleY - 18);
+  ctx.fillStyle = color;
+  ctx.fillRect(x1 * scaleX, textY, textWidth + 6, 16);
+  ctx.fillStyle = "#000";
+  ctx.fillText(label, x1 * scaleX + 3, textY + 12);
+}
+
 function drawLoop() {
   updateAlarm();
   const video = el.video;
@@ -403,22 +459,7 @@ function drawLoop() {
   const now = Date.now();
   ctx.font = "12px sans-serif";
   for (const track of Object.values(state.tracks)) {
-    const [x1, y1, x2, y2] = track.bbox;
-    const wanted = track.label && isWanted(track.label);
-    const color = track.status === "matched" ? (wanted ? "#ff1744" : "#2ecc71")
-      : track.status === "unknown" ? "#ff9800" : "#ffd54f";
-    ctx.strokeStyle = color;
-    ctx.lineWidth = wanted ? 4 : 2;
-    ctx.globalAlpha = wanted ? 0.55 + 0.45 * Math.abs(Math.sin(now / 180)) : 1;
-    ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
-    ctx.globalAlpha = 1;
-    const label = `${track.label || "UNKNOWN"}${track.score != null ? ` ${track.score.toFixed(3)}` : ""}`;
-    const textWidth = ctx.measureText(label).width;
-    const textY = Math.max(0, y1 * scaleY - 18);
-    ctx.fillStyle = color;
-    ctx.fillRect(x1 * scaleX, textY, textWidth + 6, 16);
-    ctx.fillStyle = "#000";
-    ctx.fillText(label, x1 * scaleX + 3, textY + 12);
+    drawTrack(ctx, track, scaleX, scaleY, now);
   }
   requestAnimationFrame(drawLoop);
 }
@@ -529,15 +570,7 @@ el.deviceInput.addEventListener("input", () => {
   controlButtons.forEach((button) => (button.disabled = !hasDevice));
 });
 
-async function init() {
-  try {
-    const response = await fetch("/api/wanted");
-    const body = await response.json();
-    state.wantedPatterns = (body.entries || []).map((entry) => new RegExp(entry.match));
-    state.wantedNames = (body.entries || []).map((entry) => entry.name || entry.match);
-  } catch {
-    state.wantedPatterns = [];
-  }
+function init() {
   connectWs();
   drawLoop();
 }

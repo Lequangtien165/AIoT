@@ -98,7 +98,7 @@ class ClientHub:
         loop.call_soon_threadsafe(self._broadcast_locked, message)
 
     def _broadcast_locked(self, message: dict[str, Any]) -> None:
-        for queue in list(self._queues):
+        for queue in self._queues:
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
@@ -131,22 +131,19 @@ class ClientHub:
 
     def publish_command(self, device_id: str, action: str, requested_by: str) -> str:
         if self._mqtt is None or not self.mqtt_connected:
-            raise HTTPException(status_code=503, detail="MQTT broker is not connected.")
+            raise MqttUnavailable("MQTT broker is not connected.")
         message = payloads.stream_control(
             action=action,
             target_device_id=device_id,
             requested_by=requested_by,
         )
         policy = topic_policy(control_stream_topic(device_id))
-        try:
-            self._mqtt.publish(
-                control_stream_topic(device_id),
-                message,
-                qos=policy.qos,
-                retain=policy.retain,
-            )
-        except MqttPublishError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
+        self._mqtt.publish(
+            control_stream_topic(device_id),
+            message,
+            qos=policy.qos,
+            retain=policy.retain,
+        )
         return message["command_id"]
 
     def close(self) -> None:
@@ -154,6 +151,51 @@ class ClientHub:
             self._mqtt.close()
             self._mqtt = None
         self.mqtt_connected = False
+
+
+def _validate_control_body(body: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate an /api/control request body, returning (device_id, action, requested_by)."""
+    device_id = body.get("device_id")
+    action = body.get("action")
+    requested_by = body.get("requested_by", "dashboard")
+    if not isinstance(device_id, str) or not device_id.strip():
+        raise HTTPException(status_code=422, detail="device_id is required.")
+    if action not in CONTROL_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"action must be one of {sorted(CONTROL_ACTIONS)}.",
+        )
+    if not isinstance(requested_by, str) or not requested_by.strip():
+        requested_by = "dashboard"
+    return device_id.strip(), str(action), requested_by
+
+
+async def _websocket_loop(
+    websocket: WebSocket,
+    hub: ClientHub,
+    config: DashboardConfig,
+) -> None:
+    """Serve the /ws endpoint: hello, snapshots, then live MQTT events."""
+    await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    hub.register(queue)
+    try:
+        await websocket.send_json(
+            {
+                "type": "hello",
+                "video": {"url": config.video_url, "path": config.video_path},
+            }
+        )
+        await websocket.send_json({"type": "status_snapshot", "devices": hub.statuses})
+        recent = query_audit_events(config.audit_db, limit=50)
+        await websocket.send_json({"type": "events_snapshot", "events": recent})
+        while True:
+            message = await queue.get()
+            await websocket.send_json(message)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.unregister(queue)
 
 
 def create_app(config: DashboardConfig | None = None) -> FastAPI:
@@ -210,45 +252,39 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             ]
         }
 
-    @app.post("/api/control")
+    @app.get("/api/wanted/match")
+    def wanted_match(label: str = Query(default="", max_length=256)) -> dict[str, Any]:
+        entry = wanted_list.match(label or None)
+        return {
+            "wanted": entry is not None,
+            "entry": (
+                {"name": entry.name, "severity": entry.severity}
+                if entry is not None
+                else None
+            ),
+        }
+
+    @app.post(
+        "/api/control",
+        responses={
+            422: {"description": "Invalid request body."},
+            502: {"description": "MQTT publish failed."},
+            503: {"description": "MQTT broker is not connected."},
+        },
+    )
     def control(body: dict[str, Any]) -> dict[str, Any]:
-        device_id = body.get("device_id")
-        action = body.get("action")
-        requested_by = body.get("requested_by", "dashboard")
-        if not isinstance(device_id, str) or not device_id.strip():
-            raise HTTPException(status_code=422, detail="device_id is required.")
-        if action not in CONTROL_ACTIONS:
-            raise HTTPException(
-                status_code=422,
-                detail=f"action must be one of {sorted(CONTROL_ACTIONS)}.",
-            )
-        if not isinstance(requested_by, str) or not requested_by.strip():
-            requested_by = "dashboard"
-        command_id = hub.publish_command(device_id.strip(), action, requested_by)
+        device_id, action, requested_by = _validate_control_body(body)
+        try:
+            command_id = hub.publish_command(device_id, action, requested_by)
+        except MqttUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except MqttPublishError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
         return {"command_id": command_id, "accepted": True}
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        await websocket.accept()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=500)
-        hub.register(queue)
-        try:
-            await websocket.send_json(
-                {
-                    "type": "hello",
-                    "video": {"url": config.video_url, "path": config.video_path},
-                }
-            )
-            await websocket.send_json({"type": "status_snapshot", "devices": hub.statuses})
-            recent = query_audit_events(config.audit_db, limit=50)
-            await websocket.send_json({"type": "events_snapshot", "events": recent})
-            while True:
-                message = await queue.get()
-                await websocket.send_json(message)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            hub.unregister(queue)
+        await _websocket_loop(websocket, hub, config)
 
     if WEB_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

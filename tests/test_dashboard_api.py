@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from aiot.mqtt import payloads
 from aiot.mqtt.audit_logger import AuditStore
+from aiot.mqtt.client import MqttUnavailable
 from aiot.mqtt.topics import (
     TOPIC_MOTION_DETECTED,
     TOPIC_RECOGNITION_RESULT,
@@ -111,6 +112,31 @@ class DashboardApiTests(unittest.TestCase):
         self.assertGreater(len(entries), 0)
         self.assertIn("match", entries[0])
 
+    def test_wanted_match_returns_entry_for_matching_label(self):
+        with TestClient(self.app) as client:
+            response = client.get("/api/wanted/match", params={"label": "A00147 - Male"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["wanted"])
+        self.assertIsNotNone(body["entry"])
+
+    def test_wanted_match_reports_unmatched_label(self):
+        with TestClient(self.app) as client:
+            response = client.get("/api/wanted/match", params={"label": "Alice"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["wanted"])
+        self.assertIsNone(body["entry"])
+
+    def test_wanted_match_handles_empty_label(self):
+        with TestClient(self.app) as client:
+            response = client.get("/api/wanted/match")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["wanted"])
+
     def test_control_publishes_command_and_returns_command_id(self):
         with TestClient(self.app) as client:
             response = client.post(
@@ -142,6 +168,16 @@ class DashboardApiTests(unittest.TestCase):
             response = client.post("/api/control", json={"action": "start"})
 
         self.assertEqual(response.status_code, 422)
+
+    def test_control_returns_503_when_mqtt_is_down(self):
+        self.mqtt_mock.return_value.connect.side_effect = MqttUnavailable("broker down")
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/api/control",
+                json={"device_id": "pi4-edge-01", "action": "stop"},
+            )
+
+        self.assertEqual(response.status_code, 503)
 
     def test_index_serves_dashboard_page(self):
         with TestClient(self.app) as client:

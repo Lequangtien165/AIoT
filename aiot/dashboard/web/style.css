@@ -16,6 +16,18 @@
 
 * { box-sizing: border-box; }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -204,7 +216,7 @@ html, body {
 .event:hover { background: #18212c; }
 .event .ev-time { color: var(--muted); font-size: 11px; }
 .event .ev-title { font-weight: 600; }
-.event .ev-detail { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-word; }
+.event .ev-detail { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
 
 .event.match { border-left-color: var(--green); }
 .event.match.wanted { border-left-color: var(--red); background: #241014; }
@@ -249,5 +261,5 @@ html, body {
   overflow-x: auto;
   font-size: 12px;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }

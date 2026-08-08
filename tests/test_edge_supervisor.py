@@ -25,11 +25,15 @@ class EdgeCommandValidationTests(unittest.TestCase):
         command = validate_command(self.command(), "edge-1")
         self.assertEqual((command.command_id, command.action), ("cmd-1", "start"))
 
-    def test_rejects_unknown_action_and_missing_command_id(self):
+    def test_rejects_unknown_action(self):
         with self.assertRaises(CommandValidationError):
             validate_command(self.command(action="exec"), "edge-1")
+
+    def test_rejects_missing_command_id(self):
         with self.assertRaises(CommandValidationError):
             validate_command(self.command(command_id=""), "edge-1")
+
+    def test_rejects_unexpected_parameters(self):
         with self.assertRaises(CommandValidationError):
             validate_command(self.command(parameters={"shell": "ignored"}), "edge-1")
 
