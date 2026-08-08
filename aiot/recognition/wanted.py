@@ -19,6 +19,14 @@ DEFAULT_WANTED_CONFIG = PROJECT_ROOT / "config" / "wanted.json"
 SUPPORTED_SCHEMA_VERSION = 1
 
 
+def _validate_config_path(path: str | Path) -> Path:
+    """Validate a wanted-config path before touching the file system."""
+    raw = str(path)
+    if raw.lower().startswith("file:") or Path(path).suffix.lower() != ".json":
+        raise ValueError("Wanted config path must be a local .json file.")
+    return Path(path).resolve()
+
+
 @dataclass(frozen=True)
 class WantedEntry:
     match: str
@@ -50,13 +58,14 @@ class WantedList:
     """Thread-safe wanted-person matcher backed by a JSON config file."""
 
     def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path) if path is not None else DEFAULT_WANTED_CONFIG
+        self.path = _validate_config_path(path) if path is not None else DEFAULT_WANTED_CONFIG
         self._lock = threading.Lock()
         self._entries: list[WantedEntry] = []
         self.reload()
 
     def reload(self) -> None:
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        path = _validate_config_path(self.path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("wanted.json must contain an object.")
         if raw.get("schema_version") != SUPPORTED_SCHEMA_VERSION:

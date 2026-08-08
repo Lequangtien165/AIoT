@@ -85,21 +85,26 @@ def read_or_reconnect(camera, source: str, reconnecting: bool, delay: float):
     return None, None, reconnecting, should_stop
 
 
+def preview_step(camera, source: str, reconnecting: bool, delay: float):
+    """Run one preview loop iteration, returning the next camera/frame state."""
+    if camera is None:
+        camera, reconnecting, should_stop = open_or_reconnect(
+            source, reconnecting, delay
+        )
+        if should_stop or camera is None:
+            return camera, None, reconnecting, should_stop
+    camera, frame, reconnecting, should_stop = read_or_reconnect(
+        camera, source, reconnecting, delay
+    )
+    return camera, frame, reconnecting, should_stop
+
+
 def run_preview(source: str, reconnect_delay: float, detector: FaceDetector) -> None:
     camera = None
     reconnecting = False
     try:
         while True:
-            if camera is None:
-                camera, reconnecting, should_stop = open_or_reconnect(
-                    source, reconnecting, reconnect_delay
-                )
-                if should_stop:
-                    return
-                if camera is None:
-                    continue
-
-            camera, frame, reconnecting, should_stop = read_or_reconnect(
+            camera, frame, reconnecting, should_stop = preview_step(
                 camera, source, reconnecting, reconnect_delay
             )
             if should_stop:
