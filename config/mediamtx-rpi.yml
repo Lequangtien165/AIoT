@@ -1,0 +1,31 @@
+# RTSP relay for the Raspberry Pi CSI direct publisher, reachable by trusted LAN clients.
+# MediaMTX owns the camera through libcamera and hardware H.264 encoding; no FFmpeg is used.
+# Keys verified against MediaMTX v1.19.3 (rpiCameraCodec replaces the legacy
+# rpiCameraHardwareH264 boolean).
+logLevel: info
+logDestinations: [stdout]
+
+rtsp: true
+rtspAddress: 0.0.0.0:8554
+rtspTransports: [tcp]
+
+rtmp: false
+hls: false
+webrtc: true
+webrtcAddress: :8889
+webrtcEncryption: false
+webrtcLocalUDPAddress: :8189
+srt: false
+moq: false
+
+paths:
+  camera:
+    source: rpiCamera
+    rpiCameraCamID: 0
+    rpiCameraWidth: 1280
+    rpiCameraHeight: 720
+    rpiCameraFPS: 30
+    rpiCameraCodec: hardwareH264
+    rpiCameraBitrate: 2000000
+    rpiCameraH264Profile: high
+    rpiCameraH264Level: 4.1
