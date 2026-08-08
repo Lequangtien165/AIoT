@@ -1,5 +1,15 @@
 # Raspberry Pi 4 Test Plan
 
+> **Status**: Current (2026-08-08) — hardware re-validation procedure pending.
+> Part of the [documentation hub](../README.md).
+
+> Updated 2026-08-08: Option 1 is now automated as the `rpi-csi` deployment
+> profile (`stream_server.py --profile rpi-csi`, `config/mediamtx-rpi.yml`,
+> preflight checks, `deploy/systemd/aiot-rpi-csi.service`). This plan is the
+> hardware re-validation procedure after the Gate 1 automation; it previously
+> described the manual setup that first proved the direct publisher on
+> 2026-08-05. The full multi-role runbook is `../RUNBOOK.md`.
+
 ## Goal
 
 Validate that a Raspberry Pi 4 can publish Pi Camera video through RTSP to the Windows laptop that runs the detection and recognition pipeline. The edge is responsible only for streaming and the MQTT control plane; AI runs on the cloud/laptop tier.
@@ -10,18 +20,24 @@ Validate that a Raspberry Pi 4 can publish Pi Camera video through RTSP to the W
 - Do not use `libcamera-vid` or the legacy camera stack.
 - Prefer H.264 hardware encoding and RTSP over TCP.
 
-## Option 1: MediaMTX Reads the Pi Camera Directly
+## Option 1: MediaMTX Reads the Pi Camera Directly (implemented as `rpi-csi`)
 
-Test this option first because it requires the least edge code.
+This is the primary option; it is automated and requires no FFmpeg on the Pi.
 
-```yaml
-paths:
-  camera:
-    source: rpiCamera
-    rpiCameraWidth: 1280
-    rpiCameraHeight: 720
-    rpiCameraFPS: 30
-    rpiCameraCodec: hardwareH264
+```bash
+# On the Pi (project at /opt/aiot, venv created, tools installed):
+python stream_server.py --profile rpi-csi --list-devices   # libcamera enumeration
+python stream_server.py --profile rpi-csi                  # preflight + publish
+```
+
+The preflight verifies Linux ARM64, `rpicam-*`, camera availability, MediaMTX,
+its configuration (`config/mediamtx-rpi.yml`), and the RTSP port — without
+requiring V4L2 or `libx264`. Boot deployment:
+
+```bash
+sudo cp deploy/systemd/aiot-rpi-csi.service /etc/systemd/system/
+sudo systemctl enable --now aiot-rpi-csi
+journalctl -u aiot-rpi-csi -f
 ```
 
 The Windows laptop reads the stream:
@@ -73,15 +89,16 @@ Reference: https://github.com/raspberrypi/picamera2
 ## Test Sequence
 
 1. Install Raspberry Pi OS Bookworm, update the system, connect the Pi Camera, and confirm that `rpicam-hello` works.
-2. Run Option 1 at `1280x720@30`; open the stream on the Windows laptop with `app.py --source "rtsp://<PI_IP>:8554/camera"`.
-3. Run `recognize_stream.py --source "rtsp://<PI_IP>:8554/camera"` on Windows and validate detection, recognition, tracking, and reconnect behavior.
-4. Measure FPS, bitrate, CPU use, temperature, recognition latency, and Wi-Fi/LAN stability during a sustained session.
-5. If the publisher must be Python-managed, move to Option 2 while retaining H.264 passthrough.
-6. Move to Option 3 only when MQTT requires detailed camera control.
+2. Run the `rpi-csi` profile at `1280x720@30`; verify the preflight passes on the real device and `rpicam-hello --list-cameras` behaves as the preflight assumes; open the stream on the Windows laptop with `app.py --source "rtsp://<PI_IP>:8554/camera"`.
+3. Install and enable `deploy/systemd/aiot-rpi-csi.service`; reboot and confirm the stream returns without manual action (`journalctl -u aiot-rpi-csi`), then stop/start the service to confirm `Restart=always` recovery.
+4. Run `recognize_stream.py --source "rtsp://<PI_IP>:8554/camera"` on Windows and validate detection, recognition, tracking, and reconnect behavior.
+5. Measure FPS, bitrate, CPU use, temperature, recognition latency, and Wi-Fi/LAN stability during a sustained session.
+6. If the publisher must be Python-managed, move to Option 2 while retaining H.264 passthrough.
+7. Move to Option 3 only when MQTT requires detailed camera control.
 
 ## Success Criteria
 
-- The Pi Camera publishes a stable RTSP stream through the LAN to the Windows laptop.
+- The Pi Camera publishes a stable RTSP stream through the LAN to the Windows laptop using the `rpi-csi` profile and survives boot/service restarts via systemd.
 - The laptop reconnects after the Pi stream stops and restarts.
 - The detection/recognition pipeline processes the Pi stream without changing cloud logic.
 - The Pi 4 maintains the target FPS and bitrate without overheating or CPU saturation.

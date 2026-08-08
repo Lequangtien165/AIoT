@@ -1,5 +1,8 @@
 # Edge-Triggered Face Session Strategy (DONE)
 
+> **Status**: Current design, implemented (2026-08-08); the "Web Relay" section
+> is explicitly future work. Part of the [documentation hub](../README.md).
+
 ## Chosen Parameters
 
 | Parameter | Value |
@@ -182,7 +185,11 @@ When the cloud receives `system/status/<device_id>` with state `streaming`:
 
 The cloud does not need to send an explicit stop command for this lifecycle.
 
-## Web Relay
+## Web Relay (Future Work)
+
+> Not implemented: there is no Flask/FastAPI service, MJPEG server, or
+> WebSocket/SSE relay in the codebase as of 2026-08-08. The section below is
+> the intended design, not current behavior.
 
 The recognition pipeline renders each frame once:
 

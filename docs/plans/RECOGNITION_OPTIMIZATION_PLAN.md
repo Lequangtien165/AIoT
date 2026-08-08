@@ -1,5 +1,8 @@
 # InsightFace Detection and Recognition Optimization Plan (DONE)
 
+> **Status**: Current design contract, implemented (2026-08-08); benchmark
+> evidence pending. Part of the [documentation hub](../README.md).
+
 ## Decision
 
 The production realtime recognition pipeline uses InsightFace `buffalo_l`
