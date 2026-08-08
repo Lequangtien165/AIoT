@@ -25,21 +25,32 @@ DEFAULT_MAX_RECORDS = 100_000
 REQUIRED_FIELDS_BY_TOPIC = {
     "recognition/result": {"schema_version", "ts_ms", "frame_id", "result_id", "tracks", "events"},
     "motion/detected": {"schema_version", "ts_ms", "device_id", "sensor_id", "active"},
+    "control/ack": {"schema_version", "ts_ms", "command_id", "target_device_id", "action", "result"},
 }
 
 
+def topic_matches(subscription: str, topic: str) -> bool:
+    """Return whether a concrete topic matches a subscription pattern."""
+    if subscription.endswith("/#"):
+        return topic.startswith(subscription[:-1])
+    if "+" in subscription:
+        subscription_parts = subscription.split("/")
+        topic_parts = topic.split("/")
+        if len(subscription_parts) != len(topic_parts):
+            return False
+        return all(pattern == "+" or part == pattern for part, pattern in zip(topic_parts, subscription_parts))
+    return topic == subscription
+
+
 def is_audit_topic(topic: str) -> bool:
-    for subscription in AUDIT_TOPICS:
-        if subscription.endswith("/#") and topic.startswith(subscription[:-1]):
-            return True
-        if topic == subscription:
-            return True
-    return False
+    return any(topic_matches(subscription, topic) for subscription in AUDIT_TOPICS)
 
 
 def required_fields_for_topic(topic: str) -> set[str]:
     if topic.startswith("error/"):
         return {"schema_version", "ts_ms", "component", "message"}
+    if topic.startswith("control/ack/"):
+        return REQUIRED_FIELDS_BY_TOPIC["control/ack"]
     return REQUIRED_FIELDS_BY_TOPIC.get(topic, set())
 
 
@@ -94,6 +105,13 @@ def _validate_topic_payload(topic: str, payload: dict[str, Any]) -> None:
         _require_non_empty_string(payload, "sensor_id")
         if not isinstance(payload.get("active"), bool):
             raise ValueError("Audit field active must be a boolean.")
+    elif topic.startswith("control/ack/"):
+        for field in ("command_id", "target_device_id", "action", "result"):
+            _require_non_empty_string(payload, field)
+        if not isinstance(payload.get("message"), str):
+            raise ValueError("Audit field message must be a string.")
+        if payload.get("state") is not None and not isinstance(payload["state"], str):
+            raise ValueError("Audit field state must be a string or null.")
     elif topic.startswith("error/"):
         _require_non_empty_string(payload, "component")
         _require_non_empty_string(payload, "message")
@@ -187,6 +205,76 @@ class AuditStore:
                 """,
                 (self.max_records,),
             )
+
+
+def query_audit_events(
+    path: str | Path | None = None,
+    *,
+    topics: list[str] | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    since_ts_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent audit events, newest first, decoded from SQLite.
+
+    The database file is opened read-only per call so the dashboard can query
+    the same file the logger writes to. A missing file returns an empty list.
+    """
+    resolved_path = resolve_audit_db_path(path)
+    if not resolved_path.exists():
+        return []
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    clauses: list[str] = []
+    parameters: list[Any] = []
+    if topics:
+        clause = " OR ".join("topic LIKE ?" for _ in topics)
+        clauses.append(f"({clause})")
+        parameters.extend(_topic_like_pattern(topic) for topic in topics)
+    if since_ts_ms is not None and since_ts_ms >= 0:
+        clauses.append("event_ts_ms >= ?")
+        parameters.append(int(since_ts_ms))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    parameters.extend((limit, offset))
+    connection = sqlite3.connect(resolved_path)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT id, received_at, topic, event_ts_ms, schema_version, payload_json
+            FROM mqtt_audit_events
+            {where}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            parameters,
+        ).fetchall()
+    finally:
+        connection.close()
+    events: list[dict[str, Any]] = []
+    for row_id, received_at, topic, event_ts_ms, schema_version, payload_json in rows:
+        try:
+            payload = json.loads(payload_json)
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        events.append(
+            {
+                "id": row_id,
+                "received_at": received_at,
+                "topic": topic,
+                "event_ts_ms": event_ts_ms,
+                "schema_version": schema_version,
+                "payload": payload,
+            }
+        )
+    return events
+
+
+def _topic_like_pattern(subscription: str) -> str:
+    if subscription.endswith("/#"):
+        return f"{subscription[:-1]}%"
+    if "+" in subscription:
+        return subscription.replace("+", "%")
+    return subscription
 
 
 def parse_args() -> argparse.Namespace:
