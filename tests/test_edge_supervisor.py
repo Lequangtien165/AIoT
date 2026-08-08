@@ -76,9 +76,11 @@ class EdgeSupervisorTests(unittest.TestCase):
     def test_stop_start_and_restart(self):
         stop_ack = self.supervisor.handle(self.command("stop", "stop-1"))
         self.assertEqual(stop_ack["result"], "succeeded")
+        self.assertEqual(stop_ack["state"], "stopped")
         self.assertEqual(self.supervisor.state, EdgeState.STOPPED)
         start_ack = self.supervisor.handle(self.command("start", "start-1"))
         self.assertEqual(start_ack["result"], "succeeded")
+        self.assertEqual(start_ack["state"], "streaming")
         self.assertEqual(self.supervisor.state, EdgeState.STREAMING)
         restart_ack = self.supervisor.handle(self.command("restart", "restart-1"))
         self.assertEqual(restart_ack["result"], "succeeded")
@@ -135,6 +137,36 @@ class EdgeSupervisorTests(unittest.TestCase):
         ack = self.supervisor.handle(self.command("restart", "restart-fail-1"))
         self.assertEqual(ack["result"], "failed")
         self.assertEqual(self.supervisor.state, EdgeState.ERROR)
+
+    def test_stop_runtime_failure_moves_to_error_without_raising(self):
+        self.stop.side_effect = RuntimeError("stop boom")
+        ack = self.supervisor.handle(self.command("stop", "stop-fail-1"))
+        self.assertEqual(ack["result"], "failed")
+        self.assertIn("stop boom", ack["message"])
+        self.assertEqual(self.supervisor.state, EdgeState.ERROR)
+
+    def test_restart_stop_failure_moves_to_error_without_raising(self):
+        self.stop.side_effect = RuntimeError("stop boom")
+        ack = self.supervisor.handle(self.command("restart", "restart-stop-fail-1"))
+        self.assertEqual(ack["result"], "failed")
+        self.assertEqual(self.supervisor.state, EdgeState.ERROR)
+        self.start.assert_not_called()
+
+    def test_start_after_runtime_died_restarts_instead_of_already_started(self):
+        self.alive.return_value = False
+        ack = self.supervisor.handle(self.command("start", "start-dead-1"))
+        self.assertEqual(ack["result"], "succeeded")
+        self.assertEqual(self.start.call_count, 1)
+        self.assertEqual(self.supervisor.state, EdgeState.STREAMING)
+
+    def test_status_includes_stream_active_metric_when_callback_provided(self):
+        self.supervisor.stream_active = Mock(return_value=False)
+        ack = self.supervisor.handle(self.command("status", "status-active-1"))
+        self.assertFalse(ack["status"]["rtsp_stream_active"])
+
+    def test_status_omits_stream_active_metric_without_callback(self):
+        ack = self.supervisor.handle(self.command("status", "status-no-callback-1"))
+        self.assertNotIn("rtsp_stream_active", ack["status"])
 
 
 if __name__ == "__main__":
