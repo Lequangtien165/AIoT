@@ -79,7 +79,7 @@ class CloudEdgeSession:
         self.last_presence = 0.0
         self.capture_enabled = threading.Event()
 
-    def update(self, topic: str, payload: dict, retained: bool) -> None:
+    def update(self, topic: str, payload: dict, _retained: bool) -> None:
         if topic != system_status_topic(self.device_id):
             return
         if payload.get("schema_version") != payloads.SCHEMA_VERSION or payload.get("device_id") != self.device_id:
@@ -310,9 +310,10 @@ class LatestFrameReader:
         self.reconnect_delay = reconnect_delay
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._capture_enabled = capture_enabled or threading.Event()
         if capture_enabled is None:
-            self._capture_enabled.set()
+            capture_enabled = threading.Event()
+            capture_enabled.set()
+        self._capture_enabled = capture_enabled
         self._thread = threading.Thread(target=self._run, name="LatestFrameReader", daemon=True)
         self._latest: StreamFrame | None = None
         self._frames_read = 0
@@ -340,6 +341,35 @@ class LatestFrameReader:
         with self._lock:
             return self._frames_read
 
+    def _release_capture(self, camera, capture_active: bool) -> tuple[None, bool]:
+        if camera is not None:
+            camera.release()
+            camera = None
+        if capture_active:
+            print("[RTSP] capture released; waiting for edge stream")
+            capture_active = False
+        with self._lock:
+            self._latest = None
+        return camera, capture_active
+
+    def _open_camera(self, camera, reconnecting: bool) -> tuple[object | None, bool]:
+        if camera is not None:
+            return camera, reconnecting
+        camera = open_capture(self.source)
+        if not camera.isOpened():
+            camera.release()
+            camera = None
+            if not reconnecting:
+                print(
+                    f"Could not open RTSP stream: {display_source(self.source)}. Retrying...",
+                    file=sys.stderr,
+                )
+            reconnecting = True
+            self._stop_event.wait(self.reconnect_delay)
+            return camera, reconnecting
+        self._source_fps = camera.get(cv2.CAP_PROP_FPS)
+        return camera, False
+
     def _run(self) -> None:
         camera = None
         frame_id = 0
@@ -348,31 +378,15 @@ class LatestFrameReader:
         try:
             while not self._stop_event.is_set():
                 if not self._capture_enabled.is_set():
-                    if camera is not None:
-                        camera.release()
-                        camera = None
-                    if capture_active:
-                        print("[RTSP] capture released; waiting for edge stream")
-                        capture_active = False
-                    with self._lock:
-                        self._latest = None
+                    camera, capture_active = self._release_capture(camera, capture_active)
                     self._capture_enabled.wait(0.1)
                     continue
                 if not capture_active:
                     print("[RTSP] capture enabled; waiting for edge RTSP stream")
                     capture_active = True
+                camera, reconnecting = self._open_camera(camera, reconnecting)
                 if camera is None:
-                    camera = open_capture(self.source)
-                    if not camera.isOpened():
-                        camera.release()
-                        camera = None
-                        if not reconnecting:
-                            print(f"Could not open RTSP stream: {display_source(self.source)}. Retrying...", file=sys.stderr)
-                        reconnecting = True
-                        self._stop_event.wait(self.reconnect_delay)
-                        continue
-                    self._source_fps = camera.get(cv2.CAP_PROP_FPS)
-                    reconnecting = False
+                    continue
 
                 success, frame = camera.read()
                 if not success:
@@ -698,6 +712,34 @@ def update_profile(
     )
 
 
+def render_next_frame(
+    args,
+    result: RecognitionResult | None,
+    source_frame: np.ndarray,
+    source_fps: float,
+    output,
+    mqtt_client,
+    consumed_result_id: int,
+) -> int:
+    """Render one frame's recognition result; returns the consumed result id."""
+    display_frame, display_scale = resize_for_display(source_frame, 1280)
+    if display_frame is source_frame:
+        display_frame = display_frame.copy()
+    consumed_result_id = render_recognition_result(
+        args,
+        result,
+        source_frame,
+        display_frame,
+        display_scale,
+        output,
+        mqtt_client,
+        consumed_result_id,
+    )
+    output.write_frame(display_frame, source_fps)
+    cv2.imshow(WINDOW_TITLE, display_frame)
+    return consumed_result_id
+
+
 def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker, output, mqtt_client) -> None:
     display_frames = 0
     consumed_result_id = 0
@@ -722,21 +764,15 @@ def run_display_loop(args, reader: LatestFrameReader, worker: RecognitionWorker,
             continue
         last_rendered_frame_id = stream_frame.frame_id
         last_rendered_result_id = result_id
-        display_frame, display_scale = resize_for_display(stream_frame.frame, 1280)
-        if display_frame is stream_frame.frame:
-            display_frame = display_frame.copy()
-        consumed_result_id = render_recognition_result(
+        consumed_result_id = render_next_frame(
             args,
             result,
             stream_frame.frame,
-            display_frame,
-            display_scale,
+            stream_frame.source_fps,
             output,
             mqtt_client,
             consumed_result_id,
         )
-        output.write_frame(display_frame, stream_frame.source_fps)
-        cv2.imshow(WINDOW_TITLE, display_frame)
         display_frames += 1
         last_capture_frames, last_recognition_frames, last_display_frames, last_profile_time = update_profile(
             args,
@@ -763,6 +799,35 @@ def handle_result_events(result: RecognitionResult, frame: np.ndarray, output) -
     return event_payloads
 
 
+def connect_mqtt_client(args, edge_session) -> MqttClient | None:
+    """Build and connect the MQTT client; raises on broker failure."""
+    if not args.mqtt_host:
+        return None
+    client = MqttClient(
+        host=args.mqtt_host,
+        port=args.mqtt_port,
+        client_id=args.mqtt_client_id,
+        username=args.mqtt_username,
+        password=password_from_env(args.mqtt_username, args.mqtt_password_env),
+        ca_cert=args.mqtt_ca_cert,
+        on_message_metadata=edge_session.update if edge_session is not None else None,
+    )
+    if edge_session is not None:
+        client.subscribe(system_status_topic(args.source_device_id), qos=0)
+    client.connect()
+    publish_mqtt(
+        client,
+        system_status_topic(args.mqtt_client_id),
+        payloads.system_status(
+            device_id=args.mqtt_client_id,
+            component="recognition",
+            state="starting",
+            message="Recognition pipeline is starting.",
+        ),
+    )
+    return client
+
+
 def main() -> int:
     args = parse_args()
     if platform.system() != "Windows":
@@ -777,36 +842,13 @@ def main() -> int:
 
     args.wanted = WantedList(args.wanted_config)
 
-    mqtt_client: MqttClient | None = None
     edge_session = CloudEdgeSession(args.source_device_id) if args.edge_triggered_session else None
     args._edge_session = edge_session
-    if args.mqtt_host:
-        try:
-            mqtt_client = MqttClient(
-                host=args.mqtt_host,
-                port=args.mqtt_port,
-                client_id=args.mqtt_client_id,
-                username=args.mqtt_username,
-                password=password_from_env(args.mqtt_username, args.mqtt_password_env),
-                ca_cert=args.mqtt_ca_cert,
-                on_message_metadata=edge_session.update if edge_session is not None else None,
-            )
-            if edge_session is not None:
-                mqtt_client.subscribe(system_status_topic(args.source_device_id), qos=0)
-            mqtt_client.connect()
-            publish_mqtt(
-                mqtt_client,
-                system_status_topic(args.mqtt_client_id),
-                payloads.system_status(
-                    device_id=args.mqtt_client_id,
-                    component="recognition",
-                    state="starting",
-                    message="Recognition pipeline is starting.",
-                ),
-            )
-        except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
-            print(f"[MQTT] {error}", file=sys.stderr)
-            return 1
+    try:
+        mqtt_client = connect_mqtt_client(args, edge_session)
+    except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
+        print(f"[MQTT] {error}", file=sys.stderr)
+        return 1
 
     engine = FaceEngine(det_size=args.det_size)
     recognizer = FaceRecognizer()

@@ -143,6 +143,33 @@ def _rpi_enumeration_problems(tool: str) -> list[str]:
     return []
 
 
+def _ffmpeg_missing_problem(config: PlatformConfig) -> str:
+    if config.name == "macos-arm64":
+        hint = "Install FFmpeg with: brew install ffmpeg"
+    elif config.name == "linux-arm64":
+        hint = "Install FFmpeg and V4L2 tools with: sudo apt install -y ffmpeg v4l-utils"
+    else:
+        hint = "Run: python scripts/setup_tools.py"
+    return f"FFmpeg was not found at {config.ffmpeg_path}. {hint}"
+
+
+def _rpi_csi_problems() -> list[str]:
+    problems: list[str] = []
+    tool = rpi_camera_tool()
+    if tool is None:
+        problems.append(
+            "Raspberry Pi camera tools were not found. "
+            "Install with: sudo apt install -y rpicam-apps"
+        )
+    else:
+        problems.extend(_rpi_enumeration_problems(tool))
+    if port_in_use():
+        problems.append(
+            f"RTSP port {RTSP_PORT} is already in use by another process."
+        )
+    return problems
+
+
 def preflight(
     profile: str,
     config: PlatformConfig,
@@ -166,26 +193,9 @@ def preflight(
     if mediamtx_config is not None and not mediamtx_config.is_file():
         problems.append(f"MediaMTX configuration was not found at {mediamtx_config}.")
     if spec.uses_ffmpeg and not config.ffmpeg_path.is_file():
-        if config.name == "macos-arm64":
-            hint = "Install FFmpeg with: brew install ffmpeg"
-        elif config.name == "linux-arm64":
-            hint = "Install FFmpeg and V4L2 tools with: sudo apt install -y ffmpeg v4l-utils"
-        else:
-            hint = "Run: python scripts/setup_tools.py"
-        problems.append(f"FFmpeg was not found at {config.ffmpeg_path}. {hint}")
+        problems.append(_ffmpeg_missing_problem(config))
     if profile == RPI_CSI:
-        tool = rpi_camera_tool()
-        if tool is None:
-            problems.append(
-                "Raspberry Pi camera tools were not found. "
-                "Install with: sudo apt install -y rpicam-apps"
-            )
-        else:
-            problems.extend(_rpi_enumeration_problems(tool))
-        if port_in_use():
-            problems.append(
-                f"RTSP port {RTSP_PORT} is already in use by another process."
-            )
+        problems.extend(_rpi_csi_problems())
     if profile == V4L2 and device and device.startswith("/"):
         if not Path(device).exists():
             problems.append(f"V4L2 device {device!r} does not exist.")
