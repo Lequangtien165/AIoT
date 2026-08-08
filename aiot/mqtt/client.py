@@ -120,9 +120,13 @@ class MqttClient:
         self._connected = False
         self._pending_subscription_mids: set[int] = set()
         self._retained_payloads: dict[str, tuple[dict[str, Any], int, bool]] = {}
+        self._publish_failures: dict[int, str] = {}
+        # MQTTv5 carries PUBACK reason codes, so ACL-rejected publishes can be
+        # detected; MQTT 3.1.1 has no way to report a denied publish.
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_id,
+            protocol=mqtt.MQTTv5,
         )
         if username:
             self._client.username_pw_set(username, password)
@@ -132,6 +136,7 @@ class MqttClient:
         self._client.on_disconnect = self._handle_disconnect
         self._client.on_subscribe = self._handle_subscribe
         self._client.on_message = self._handle_message
+        self._client.on_publish = self._handle_publish
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
         self._subscriptions: list[tuple[str, int]] = []
         self.host = host
@@ -196,6 +201,9 @@ class MqttClient:
             raise MqttPublishError(f"MQTT publish failed for {topic}: rc={info.rc}")
         if qos > 0 and wait_for_delivery and hasattr(info, "wait_for_publish"):
             info.wait_for_publish(timeout=5.0)
+            reason = self._publish_failures.pop(getattr(info, "mid", -1), None)
+            if reason is not None:
+                raise MqttPublishError(f"MQTT publish rejected for {topic}: {reason}")
             if hasattr(info, "is_published") and not info.is_published():
                 raise MqttPublishError(f"MQTT publish timed out for {topic}.")
 
@@ -258,6 +266,10 @@ class MqttClient:
         self._pending_subscription_mids.discard(mid)
         if not self._pending_subscription_mids:
             self._subscription_event.set()
+
+    def _handle_publish(self, _client, _userdata, mid, reason_code, _properties) -> None:
+        if reason_code_failed(reason_code):
+            self._publish_failures[mid] = str(reason_code)
 
     def _notify_connection_state(self, state: str) -> None:
         if self._on_connection_state is None:
