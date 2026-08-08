@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from aiot.mqtt import payloads
 from aiot.mqtt.audit_logger import AUDIT_TOPICS, AuditStore
-from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttUnavailable
+from aiot.mqtt.client import MqttClient, MqttConnectionError, MqttPublishError, MqttUnavailable
 from aiot.mqtt.topics import (
     TOPIC_ERROR_PIPELINE,
     TOPIC_MOTION_DETECTED,
@@ -85,6 +86,18 @@ class MosquittoIntegrationTests(unittest.TestCase):
                         payloads.motion_detected(device_id="pi4-edge-01", sensor_id="pir-1", active=True),
                         qos=1,
                     )
+                    edge.publish(
+                        control_ack_topic("pi4-edge-01"),
+                        payloads.command_ack(
+                            command_id="integration-stop-1",
+                            target_device_id="pi4-edge-01",
+                            action="stop",
+                            result="succeeded",
+                            message="stopped",
+                            state="stopped",
+                        ),
+                        qos=1,
+                    )
                     recognizer.publish(
                         error_pipeline_topic("pi4-edge-01"),
                         payloads.error_event(
@@ -111,7 +124,7 @@ class MosquittoIntegrationTests(unittest.TestCase):
                         rows = store._connection.execute(
                             "SELECT topic, payload_json FROM mqtt_audit_events ORDER BY id"
                         ).fetchall()
-                        if len(rows) >= 3:
+                        if len(rows) >= 4:
                             break
                         time.sleep(0.1)
                 finally:
@@ -124,7 +137,12 @@ class MosquittoIntegrationTests(unittest.TestCase):
         payload_json = "\n".join(row[1] for row in rows)
         self.assertEqual(
             topics,
-            [TOPIC_RECOGNITION_RESULT, TOPIC_MOTION_DETECTED, error_pipeline_topic("pi4-edge-01")],
+            [
+                TOPIC_RECOGNITION_RESULT,
+                TOPIC_MOTION_DETECTED,
+                control_ack_topic("pi4-edge-01"),
+                error_pipeline_topic("pi4-edge-01"),
+            ],
         )
         self.assertIn("rtsp://***:***@example.test:8554/camera", payload_json)
         self.assertNotIn("secret", payload_json)
@@ -188,6 +206,99 @@ class MosquittoIntegrationTests(unittest.TestCase):
         finally:
             controller.close()
             edge.close()
+
+    def test_edge_publish_to_control_topic_is_rejected(self):
+        edge = self.connect_client("integration-edge-denied", "aiot-edge", "edge-secret")
+        try:
+            with self.assertRaises(MqttPublishError):
+                edge.publish(
+                    control_stream_topic("pi4-edge-01"),
+                    payloads.stream_control(
+                        action="stop",
+                        target_device_id="pi4-edge-01",
+                        command_id="integration-denied-1",
+                    ),
+                    qos=1,
+                )
+        finally:
+            edge.close()
+
+    def test_retained_status_is_delivered_to_late_subscriber(self):
+        received = []
+        edge = self.connect_client("integration-edge-retained", "aiot-edge", "edge-secret")
+        subscriber = MqttClient(
+            host=self.host,
+            port=self.port,
+            client_id="integration-recognition-retained",
+            username="aiot-recognition",
+            password="recognition-secret",
+            on_message_metadata=lambda topic, message, retained: received.append((topic, message, retained)),
+        )
+        try:
+            status = payloads.system_status(
+                device_id="pi4-edge-01",
+                component="rtsp-publisher",
+                state="stopped",
+            )
+            edge.publish(system_status_topic("pi4-edge-01"), status, qos=0, retain=True)
+            subscriber.subscribe(system_status_topic("pi4-edge-01"), qos=0)
+            subscriber.connect(timeout=5.0)
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not received:
+                time.sleep(0.1)
+            self.assertEqual(len(received), 1)
+            topic, message, retained = received[0]
+            self.assertEqual(topic, system_status_topic("pi4-edge-01"))
+            self.assertTrue(retained)
+            self.assertEqual(message["state"], "stopped")
+        finally:
+            edge.close()
+            subscriber.close()
+
+    def test_broker_restart_reconnects_and_replays_retained_status(self):
+        project_root = Path(__file__).resolve().parents[1]
+        received = []
+        edge = self.connect_client("integration-edge-restart", "aiot-edge", "edge-secret")
+        subscriber = MqttClient(
+            host=self.host,
+            port=self.port,
+            client_id="integration-recognition-restart",
+            username="aiot-recognition",
+            password="recognition-secret",
+            on_message=lambda topic, message: received.append((topic, message)),
+        )
+        try:
+            edge.publish(
+                system_status_topic("pi4-edge-01"),
+                payloads.system_status(
+                    device_id="pi4-edge-01",
+                    component="rtsp-publisher",
+                    state="streaming",
+                ),
+                qos=0,
+                retain=True,
+            )
+            subscriber.subscribe(system_status_topic("pi4-edge-01"), qos=0)
+            subscriber.connect(timeout=5.0)
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not received:
+                time.sleep(0.1)
+            received.clear()
+            result = subprocess.run(
+                ["docker", "compose", "restart", "mosquitto"],
+                cwd=project_root,
+                capture_output=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            deadline = time.time() + 30.0
+            while time.time() < deadline and not received:
+                time.sleep(0.2)
+            self.assertGreater(len(received), 0)
+            self.assertIn(system_status_topic("pi4-edge-01"), [item[0] for item in received])
+        finally:
+            edge.close()
+            subscriber.close()
 
 
 if __name__ == "__main__":
