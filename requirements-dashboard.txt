@@ -1,0 +1,4 @@
+# Web dashboard extra dependencies (scripts/run_dashboard.py + dashboard API tests).
+fastapi
+uvicorn[standard]
+httpx

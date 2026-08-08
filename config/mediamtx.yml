@@ -8,7 +8,10 @@ rtspTransports: [tcp]
 
 rtmp: false
 hls: false
-webrtc: false
+webrtc: true
+webrtcAddress: :8889
+webrtcEncryption: false
+webrtcLocalUDPAddress: :8189
 srt: false
 moq: false
 
