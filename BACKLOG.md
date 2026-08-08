@@ -6,24 +6,24 @@ The two gates below are the only implementation priorities before the report and
 
 ### Gate 1 - Automate Edge Deployment By Profile
 
-- [ ] Deliver one managed publisher entry point for every supported deployment profile, with no manually managed MediaMTX terminal on Raspberry Pi.
-- [ ] Define and document explicit profiles: `rpi-csi`, `v4l2`, `avfoundation`, and `dshow`; require an explicit profile where auto-detection is ambiguous.
-- [ ] Refactor `stream_server.py` so MediaMTX is always supervised but FFmpeg is an optional publisher child, rather than a mandatory process.
-- [ ] Add the `rpi-csi` profile: use a dedicated MediaMTX `rpiCamera` configuration, hardware H.264, and direct RTSP publishing without FFmpeg.
-- [ ] Add profile-specific preflight checks; Pi CSI must validate Linux ARM64, `rpicam-*`, camera availability, MediaMTX, and the RTSP port without requiring V4L2 or `libx264`.
-- [ ] Preserve and smoke-test the existing Windows DirectShow, macOS AVFoundation, and Linux V4L2 publisher profiles.
-- [ ] Add a Pi systemd deployment unit that starts the managed `rpi-csi` entry point at boot and restarts it after a failure.
+- [x] Deliver one managed publisher entry point for every supported deployment profile, with no manually managed MediaMTX terminal on Raspberry Pi.
+- [x] Define and document explicit profiles: `rpi-csi`, `v4l2`, `avfoundation`, and `dshow`; require an explicit profile where auto-detection is ambiguous.
+- [x] Refactor `stream_server.py` so MediaMTX is always supervised but FFmpeg is an optional publisher child, rather than a mandatory process.
+- [x] Add the `rpi-csi` profile: use a dedicated MediaMTX `rpiCamera` configuration, hardware H.264, and direct RTSP publishing without FFmpeg.
+- [x] Add profile-specific preflight checks; Pi CSI must validate Linux ARM64, `rpicam-*`, camera availability, MediaMTX, and the RTSP port without requiring V4L2 or `libx264`.
+- [x] Preserve and smoke-test the existing Windows DirectShow, macOS AVFoundation, and Linux V4L2 publisher profiles.
+- [x] Add a Pi systemd deployment unit that starts the managed `rpi-csi` entry point at boot and restarts it after a failure.
 - [ ] Demonstrate Pi boot/service restart -> RTSP recovery -> cloud `app.py` and `recognize_stream.py` consumption.
-- [ ] Update the README and operational runbook with profile selection and Pi deployment instructions.
+- [x] Update the README and operational runbook with profile selection and Pi deployment instructions.
 
 Completing Gate 1 closes these existing backlog items:
 
-- [ ] Update README and supported-platform claims for the validated Raspberry Pi CSI direct-publisher profile; retain the V4L2/FFmpeg profile for USB cameras.
-- [ ] Add a dedicated Pi MediaMTX configuration and a `rpi-csi` publisher profile so `stream_server.py` launches and monitors direct MediaMTX publishing without a second terminal.
-- [ ] Refactor `stream_server.py` around explicit capture/deployment profiles (`rpi-csi`, `v4l2`, `avfoundation`, `dshow`) rather than assuming every publisher has an FFmpeg child process.
-- [ ] Add profile-specific preflight checks. The Pi CSI profile must check Linux ARM64, the `rpicam-*` stack, camera availability, MediaMTX, and the RTSP port; it must not require V4L2 or `libx264`.
-- [ ] Add a systemd deployment unit for the Pi profile to start on boot and restart after failures.
-- [ ] Add unit tests for profile lifecycle and supervisor command-state transitions.
+- [x] Update README and supported-platform claims for the validated Raspberry Pi CSI direct-publisher profile; retain the V4L2/FFmpeg profile for USB cameras.
+- [x] Add a dedicated Pi MediaMTX configuration and a `rpi-csi` publisher profile so `stream_server.py` launches and monitors direct MediaMTX publishing without a second terminal.
+- [x] Refactor `stream_server.py` around explicit capture/deployment profiles (`rpi-csi`, `v4l2`, `avfoundation`, `dshow`) rather than assuming every publisher has an FFmpeg child process.
+- [x] Add profile-specific preflight checks. The Pi CSI profile must check Linux ARM64, the `rpicam-*` stack, camera availability, MediaMTX, and the RTSP port; it must not require V4L2 or `libx264`.
+- [x] Add a systemd deployment unit for the Pi profile to start on boot and restart after failures.
+- [x] Add unit tests for profile lifecycle and supervisor command-state transitions.
 
 ### Gate 2 - Define And Complete MQTT Edge Control
 
@@ -38,11 +38,23 @@ Completing Gate 1 closes these existing backlog items:
 
 Completing Gate 2 closes these existing backlog items:
 
-- [ ] Implement a persistent edge supervisor so MQTT `start` and `restart` commands can start or restart a stopped publisher; define and test their interaction with motion-triggered monitoring.
-- [ ] Define the MQTT edge command state machine: states, allowed transitions, command acknowledgement/error payloads, idempotency, and behavior for continuous versus motion-triggered streams.
-- [ ] Implement a persistent edge supervisor/agent, separate from the stoppable publisher runtime, so MQTT `start`, `stop`, `restart`, and `status` commands work consistently across profiles.
-- [ ] Keep MQTT command handling restricted to a validated command whitelist; never execute arbitrary command strings received over MQTT.
-- [ ] Add opt-in integration coverage for Pi boot/service restart, RTSP reconnect, cloud recognition consumption, MQTT status/heartbeat, and authorized MQTT control.
+- [x] Implement a persistent edge supervisor so MQTT `start` and `restart` commands can start or restart a stopped publisher; define and test their interaction with motion-triggered monitoring.
+- [x] Define the MQTT edge command state machine: states, allowed transitions, command acknowledgement/error payloads, idempotency, and behavior for continuous versus motion-triggered streams.
+- [x] Implement a persistent edge supervisor/agent, separate from the stoppable publisher runtime, so MQTT `start`, `stop`, `restart`, and `status` commands work consistently across profiles.
+- [x] Keep MQTT command handling restricted to a validated command whitelist; never execute arbitrary command strings received over MQTT.
+- [x] Add opt-in integration coverage for Pi boot/service restart, RTSP reconnect, cloud recognition consumption, MQTT status/heartbeat, and authorized MQTT control.
+
+### Gate 3 - Web Dashboard: Live Video, Timeline, And Edge Control
+
+- [x] Serve live camera video to a browser through MediaMTX WebRTC (WHEP, `:8889`, UDP mux `8189`) while keeping the RTSP TCP transport unchanged for the data plane.
+- [x] Draw recognition boxes as a browser overlay from realtime `recognition/result` MQTT events instead of re-encoding the video with annotations.
+- [x] Centralize the wanted-person decision in `aiot/recognition/wanted.py` + `config/wanted.json` shared by `recognize_stream.py` and the dashboard; a wanted match draws a red box and plays a short alarm (8 s banner TTL, 30 s per-person cooldown, synthesized beep).
+- [x] Build a FastAPI dashboard (`aiot/dashboard/server.py`, `scripts/run_dashboard.py`) with a WebSocket event feed and a REST API over the SQLite audit log (`/api/events`, `/api/status`, `/api/wanted`, `/api/control`).
+- [x] Let the dashboard issue validated `control/stream/<device>` commands (`status`, `start`, `stop`, `restart`) with generated `command_id`s and surface acks in the timeline.
+- [x] Persist `control/ack/+` in the audit logger so command history is queryable; keep `system/status/*` and `control/stream/*` out of the audit log.
+- [x] Add the `aiot-dashboard` broker principal (read events/status/acks, write `control/stream/+`) and dashboard dependencies in `requirements-dashboard.txt`.
+- [x] Add unit coverage for wanted matching, audit queries, ack validation/persistence, and the dashboard API/WebSocket behavior; extend the opt-in Mosquitto integration suite with ack persistence.
+- [ ] Validate the full demo sequence in a browser: WebRTC video from the Windows publisher and from the Pi `rpi-csi` publisher, real wanted-label alarm, and control buttons round-trip.
 
 ## 2026-08-07 Progress Notes
 
@@ -57,9 +69,7 @@ Completing Gate 2 closes these existing backlog items:
 
 ### Gate 2 Local Demo Runbook
 
-Run these commands from the repository root in PowerShell. Keep the Mosquitto container running while testing.
-
-1. Start the local broker and verify it is healthy:
+Run these commands from the repository root in PowerShell. Keep the Mosquitto container running while testing.1. Start the local broker and verify it is healthy:
 
 ```powershell
 docker compose up -d mosquitto
@@ -72,7 +82,7 @@ Expected broker port: `127.0.0.1:1883`.
 
 ```powershell
 $env:AIOT_EDGE_PASSWORD = 'edge-secret'
-venv\Scripts\python.exe scripts\run_edge_agent.py `
+.venv\Scripts\python.exe scripts\run_edge_agent.py `
   --device 'Integrated Camera' `
   --mqtt-host 127.0.0.1 `
   --mqtt-port 1883 `
@@ -125,7 +135,7 @@ for action, command_id in (("stop", "demo-stop-001"), ("start", "demo-start-001"
     print(action, "sent", command_id)
     time.sleep(2)
 client.close()
-'@ | venv\Scripts\python.exe -
+'@ | .venv\Scripts\python.exe -
 ```
 
 Successful responses must contain the same `command_id`, `result: "succeeded"`, and the resulting state. The `stop` response should report `stopped`; the `start` response should report `streaming` with `rtsp_healthy: true`.
@@ -143,13 +153,57 @@ Successful responses must contain the same `command_id`, `result: "succeeded"`, 
 
 Expected output includes H.264, `1280` x `720`, and `30/1` FPS.
 
-5. Stop the agent with `Ctrl+C`. If it was launched in the background, stop only the agent and its child `ffmpeg.exe`/`mediamtx.exe` processes so the camera and port `8554` are released. Mosquitto can be stopped separately with:
+5. Stop the agent with `Ctrl+C`. The agent terminates the publisher process tree automatically (`taskkill /T /F` on Windows, SIGTERM on POSIX), so the camera and port `8554` are released without manual cleanup. Verify no leftovers with `tasklist | findstr mediamtx` (Windows) or `pgrep -a mediamtx` (Linux/Pi) before starting another cycle. Mosquitto can be stopped separately with:
 
 ```powershell
 docker compose down
 ```
 
 Verified on 2026-08-07: broker authentication, scoped controller delivery, edge acknowledgement ACLs, retained status behavior, local camera publishing, controller `stop` -> `stopped` -> `start` -> `streaming`, and RTSP reconnect. Not yet verified: cloud `recognize_stream.py` recognition-event publication during the same sequence.
+
+## 2026-08-08 Progress Notes
+
+### Completed - Gate 3 Web Dashboard (WebRTC + Timeline + Edge Control)
+
+- [x] Added `aiot/recognition/wanted.py` + `config/wanted.json` as the single source of truth for wanted-person matching (regex patterns; default matches the IDOC `A#####` labels). `recognize_stream.py` now draws red boxes via the shared module (`--wanted-config`), replacing the hardcoded `is_idoc_label` helper.
+- [x] Enabled MediaMTX WebRTC in `config/mediamtx.yml` and `config/mediamtx-rpi.yml` (`webrtc: true`, `:8889`, `webrtcEncryption: no` on the trusted LAN, UDP mux `8189`); RTSP stays TCP-only. Browsers consume the path via WHEP.
+- [x] Added `aiot/dashboard/server.py` (FastAPI) + `scripts/run_dashboard.py` + `requirements-dashboard.txt`: WebSocket `/ws` pushes live events/status/acks; REST `/api/events` (SQLite reads), `/api/status`, `/api/wanted`, `/api/control` (validated commands with generated `command_id`s); optional `/snapshots/*` from `--snapshot-dir`. Default bind `127.0.0.1`.
+- [x] Added the browser console (`aiot/dashboard/web/`): WHEP video with Canvas recognition overlay, edge status chips, filterable timeline (match/unknown/motion/error/command), event detail drawer with snapshot images, and Status/Start/Stop/Restart buttons. Wanted match triggers red pulsing box + synthesized beep + banner (8 s TTL, 30 s cooldown per person).
+- [x] Extended the audit logger: `control/ack/+` is now persisted (validation for `command_id`/`target_device_id`/`action`/`result`/`message`/`state`), topic filters support `+` wildcards, and `query_audit_events()` provides read-only history queries for the dashboard.
+- [x] Added `aiot-dashboard` broker principal (read events/status/acks, write `control/stream/+`) and extended the Mosquitto integration suite with ack persistence.
+- [x] Added unit coverage: `tests/test_wanted.py`, `tests/test_audit_logger.py` (ack validation + queries), `tests/test_dashboard_api.py` (11 API/WebSocket tests), updated recognize-stream/audit-topic tests. Full suite: 250 tests pass, 7 skips.
+- [ ] Validate the browser demo sequence end-to-end: WebRTC video, box overlay alignment, wanted alarm, and control round-trip on the Windows machine, then against the Pi `rpi-csi` publisher.
+
+### Completed - Gate 2 Edge Agent Hardening
+
+- [x] Fixed orphan MediaMTX/FFmpeg processes on `stop`/`restart`: `stream_server.py` now converts SIGTERM into KeyboardInterrupt so the publisher cleanup always runs on POSIX, and the edge agent terminates the whole publisher process tree on Windows with `taskkill /T /F`.
+- [x] Replaced the TCP-only RTSP health check with a DESCRIBE probe (`aiot/streaming/rtsp_probe.py`): MediaMTX answers 200 only while a publisher is serving the path and 404 otherwise. Verified empirically against the local MediaMTX binary; OPTIONS returns 200 without a publisher, so it was rejected as a health signal.
+- [x] Made motion-triggered status honest: `rtsp_healthy` (TCP port) and `rtsp_stream_active` (DESCRIBE probe) are reported as separate metrics; `start` in continuous mode requires a live stream while motion-triggered mode requires only the RTSP port.
+- [x] Hardened the agent against crashes: publish failures are logged instead of fatal, a failed `stop_runtime` becomes a failed ack with the `error` state, runtime death is observed before command dispatch (no more "already started" for a dead runtime), invalid MQTT payloads are acked from the main loop instead of the Paho thread, and retained status is refreshed on broker reconnect.
+- [x] Fixed silent Mosquitto ACL bypass: `config/mosquitto/*` files were committed with CRLF line endings, so the Linux broker parsed ACL patterns with a trailing `\r` and never matched, allowing any authenticated user to read or write any topic. Converted to LF and added a `.gitattributes` rule plus a unit test that fails on CRLF.
+- [x] Upgraded the MQTT client to MQTTv5 so ACL-rejected publishes are detected through PUBACK reason codes (MQTT 3.1.1 has no way to report a denied publish) and raised as `MqttPublishError`.
+- [x] Fixed the edge agent startup state machine: the initial "starting" status publish used to flip the supervisor into `error` before the publisher had spawned, so every startup went through the error branch.
+- [x] Added unit coverage in `tests/test_rtsp_probe.py` and `tests/test_edge_agent.py`, and extended `test_edge_supervisor.py`, `test_stream_server.py`, and the opt-in Mosquitto integration suite (unauthorized control publish rejection, retained delivery to a late subscriber, broker restart retained replay).
+- [ ] Re-run the controller `stop` -> `stopped` -> `start` -> `streaming` -> RTSP reconnect sequence on the Windows machine and the target Pi hardware, verifying that `tasklist`/`pgrep` shows no leftover `mediamtx`/`ffmpeg` after `stop`.
+
+### In Progress - Gate 1 Profile-Based Edge Deployment
+
+- [x] Added `aiot/streaming/profiles.py`: `ProfileSpec` registry for `rpi-csi`, `v4l2`, `avfoundation`, and `dshow`; auto-detection (Windows -> dshow, macOS -> avfoundation, Linux -> v4l2) with `rpi-csi` never auto-detected because a Pi camera can be CSI or USB/V4L2; `resolve_profile` validation against system and architecture (32-bit `armv7l` rejected); profile preflight checks returning a problems list; `list_csi_cameras()` for `--list-devices`.
+- [x] Added `config/mediamtx-rpi.yml`: dedicated Pi configuration with `source: rpiCamera`, `rpiCameraCodec: hardwareH264`, `1280x720`, `30 FPS`. Config keys verified against MediaMTX v1.19.3 source (`rpiCameraCodec` replaces the legacy `rpiCameraHardwareH264` boolean; there is no auto-start key because static sources start immediately).
+- [x] Refactored `stream_server.py` around profiles: `--profile` flag, MediaMTX always supervised with per-profile config (`select_mediamtx_config`), FFmpeg spawned only for FFmpeg-based profiles (`monitor_publisher` handles a missing FFmpeg child and omits `ffmpeg_pid` from heartbeat metrics), `--motion-triggered` rejected with `rpi-csi`, preflight gate before device resolution, and `--list-devices` running libcamera enumeration on `rpi-csi`.
+- [x] Added `--profile` passthrough to `scripts/run_edge_agent.py`: profile resolved once in the agent, `--device` required only for FFmpeg profiles, motion-triggered rejected with `rpi-csi`, publisher command forwards the resolved profile.
+- [x] Added `deploy/systemd/aiot-rpi-csi.service` (boot start, `Restart=always`, `RestartSec=5`, `User=pi`, `Group=video`, `--profile rpi-csi --no-mqtt`) and extended `.gitattributes` to force LF on `deploy/systemd/*`.
+- [x] Added `tests/test_profiles.py` (auto-detect, resolve validation, per-profile preflight incl. rpi-csi camera enumeration and RTSP port, `port_in_use`, `list_csi_cameras`) and extended `test_stream_server.py` (profile parsing, config selection, no-FFmpeg monitoring, preflight gate, main-level profile rejections) and `test_edge_agent.py` (profile forwarding, device requirement by profile, parse validation).
+- [x] Updated `README.md` with the profile table, `--profile` usage, the Raspberry Pi CSI publisher section, and the systemd boot deployment runbook.
+- [ ] Validate the full flow on the target Pi hardware: preflight on the real device, `systemctl enable --now aiot-rpi-csi`, reboot/service-restart RTSP recovery, and cloud `app.py`/`recognize_stream.py` consumption of `rtsp://<PI_IP>:8554/camera`.
+
+### Completed - End-To-End Local Trial And Friction Fixes
+
+- [x] Fixed Windows `--list-devices` on modern FFmpeg builds: the parser only matched `"Name" (video)` while FFmpeg 8.x tags devices as `(none)` (e.g. OBS Virtual Camera), so `stream_server.py --list-devices` exited 1 and listed nothing. The parser now accepts `(video)`, `(none)`, and the legacy quoted-name section format, and still excludes audio devices and `Alternative name` lines; added 5 parser tests.
+- [x] Ran a full end-to-end trial on the Windows machine (Docker Mosquitto, real Rapoo USB camera): agent -> `stream_server` child -> MediaMTX -> FFmpeg -> RTSP H.264 1280x720 @ 30 FPS; controller `status`/`stop`/`start` with acks; clean process-tree stop (no leftover `mediamtx`/`ffmpeg`); audit logger persisted `recognition/result` and `error/pipeline` to SQLite and rejected malformed payloads; retained status readable by the controller.
+- [x] Trial found two control-plane gaps, both fixed: the `aiot-controller` ACL had no read access to `system/status/+` (controller could never observe retained status), and `command_ack` carried no `state` field (acks now report the resulting state, e.g. `stop -> state=stopped`, including failed acks for invalid commands).
+- [x] Added `docs/RUNBOOK.md` as the single end-to-end operations runbook covering all roles (fresh setup, broker, edge publisher per profile, edge agent, controller, audit logger, cloud consumer, Pi systemd deployment, verified demo sequence, troubleshooting table) and linked it from the README.
+- [ ] Verify the same sequence with `recognize_stream.py` publishing real `recognition/result` events (needs the recognition venv on the cloud laptop) and re-validate on the Pi hardware with the `rpi-csi` profile and systemd unit.
 
 ## P0 - Validate the Production Pipeline
 
@@ -205,8 +259,8 @@ Verified on 2026-08-07: broker authentication, scoped controller delivery, edge 
 
 ### Validation Performed
 
-- [x] Ran full unit test suite after the GPU pipeline refactor: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 36 tests.
-- [x] Ran full unit test suite after the tracking overlay fix: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 41 tests.
+- [x] Ran full unit test suite after the GPU pipeline refactor: `.venv\Scripts\python.exe -m unittest discover -s tests -v` passed 36 tests.
+- [x] Ran full unit test suite after the tracking overlay fix: `.venv\Scripts\python.exe -m unittest discover -s tests -v` passed 41 tests.
 - [x] Ran `git diff --check` after edits; only Windows LF/CRLF warnings were observed, with no whitespace errors.
 - [x] Created and pushed `fix/full-pipeline` with the full GPU pipeline and tracking overlay fixes.
 
@@ -244,7 +298,7 @@ Verified on 2026-08-07: broker authentication, scoped controller delivery, edge 
 - [x] Fixed `aiot/mqtt/client.py` compatibility with `paho-mqtt 2.1.0` `ReasonCode` objects.
 - [x] Added unit tests for MQTT reason-code handling.
 - [x] Validated the MQTT audit flow through a local TCP MQTT broker harness: `recognition/result`, `motion/detected`, and `error/pipeline` were persisted to SQLite, while `system/status` was not persisted.
-- [x] Ran the full unit suite after the MQTT and dataset-label changes: `venv\Scripts\python.exe -m unittest discover -s tests -v` passed 89 tests.
+- [x] Ran the full unit suite after the MQTT and dataset-label changes: `.venv\Scripts\python.exe -m unittest discover -s tests -v` passed 89 tests.
 
 ### Completed - MQTT Review Follow-up
 
@@ -257,7 +311,7 @@ Verified on 2026-08-07: broker authentication, scoped controller delivery, edge 
 - [x] Added audit validation, payload-size checks, and retention by days or max records.
 - [x] Added unit tests for IDOC label mapping, UTF-8 BOM labels, missing manifest/labels fallback, and `collect_images()` labels.
 - [x] Added a skipped-by-default Mosquitto integration test that can be enabled with `AIOT_RUN_MQTT_INTEGRATION=1`.
-- [x] Validated the Docker Mosquitto broker with the real integration test: `AIOT_RUN_MQTT_INTEGRATION=1 venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v` passed 3 tests.
+- [x] Validated the Docker Mosquitto broker with the real integration test: `$env:AIOT_RUN_MQTT_INTEGRATION='1'; .venv\Scripts\python.exe -m unittest tests.test_mqtt_mosquitto_integration -v` passed 3 tests.
 - [x] Confirmed correct broker auth behavior: demo users with the documented passwords connect successfully, while an incorrect password is rejected with `Not authorized`.
 - [x] Recreated the Mosquitto container after fixing runtime config permissions; broker logs no longer show password/ACL permission warnings.
 - [x] Validated broker restart/reconnect behavior with Docker restart: clients reconnected, audit subscriptions recovered, a post-restart `error/pipeline` event was persisted, and RTSP credential markers were not stored.
@@ -277,7 +331,7 @@ Verified on 2026-08-07: broker authentication, scoped controller delivery, edge 
 - [x] Rebuild `database/faces.index` and `database/metadata.json` after the IDOC relabeling change before running the live recognition demo.
 - [x] Keep raw mugshot images, generated embeddings, metadata, and audit databases out of Git history unless the publication policy explicitly allows them.
 - [x] Generate LAN TLS certificates and validate a real TLS MQTT connection from the Raspberry Pi to the cloud broker on port `8883`.
-- [ ] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.
+- [x] Add automated Docker integration coverage for broker restart/reconnect, retained-status replay, and unauthorized controller publishes.
 - [ ] Implement a persistent edge supervisor so MQTT `start` and `restart` commands can start or restart a stopped publisher; define and test their interaction with motion-triggered monitoring.
 - [x] Implement the generic motion-triggered edge session controller: MOG2 monitoring, FFmpeg camera handoff, `stream/activity/<device_id>`, 30-second first-face timeout, and 120-second face-presence lease.
 - [ ] Validate motion-triggered handoff and threshold tuning with real Windows/macOS/Linux cameras, then design and validate a separate Raspberry Pi Camera CSI motion adapter if that mode is required.
