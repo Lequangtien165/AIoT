@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
+    parser.add_argument(
+        "--no-mqtt",
+        action="store_true",
+        help="Disable the publisher MQTT client when controlled by run_edge_agent.py.",
+    )
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--motion-triggered", action="store_true", help="Start RTSP sessions only after significant motion.")
     parser.add_argument("--motion-device", help="OpenCV camera index/path used while monitoring; defaults to --device.")
@@ -555,7 +560,7 @@ def main() -> int:
     stop_requested = threading.Event()
     session = EdgeSessionController(args.face_discovery_timeout, args.face_keepalive_timeout) if args.motion_triggered else None
     try:
-        mqtt_client = connect_mqtt(args, stop_requested, session)
+        mqtt_client = None if args.no_mqtt else connect_mqtt(args, stop_requested, session)
     except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1

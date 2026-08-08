@@ -8,6 +8,7 @@ from dataclasses import dataclass
 TOPIC_MOTION_DETECTED = "motion/detected"
 TOPIC_SYSTEM_STATUS = "system/status"
 TOPIC_CONTROL_STREAM = "control/stream"
+TOPIC_CONTROL_ACK = "control/ack"
 TOPIC_RECOGNITION_RESULT = "recognition/result"
 TOPIC_ERROR_RTSP = "error/rtsp"
 TOPIC_ERROR_PIPELINE = "error/pipeline"
@@ -53,6 +54,10 @@ def control_stream_topic(device_id: str) -> str:
     return topic_for_device(TOPIC_CONTROL_STREAM, device_id)
 
 
+def control_ack_topic(device_id: str) -> str:
+    return topic_for_device(TOPIC_CONTROL_ACK, device_id)
+
+
 def error_rtsp_topic(device_id: str) -> str:
     return topic_for_device(TOPIC_ERROR_RTSP, device_id)
 
@@ -73,6 +78,8 @@ def topic_policy(topic: str) -> TopicPolicy:
         return TOPIC_POLICIES[TOPIC_SYSTEM_STATUS]
     if topic.startswith(f"{TOPIC_CONTROL_STREAM}/"):
         return TOPIC_POLICIES[TOPIC_CONTROL_STREAM]
+    if topic.startswith(f"{TOPIC_CONTROL_ACK}/"):
+        return TopicPolicy(qos=1, retain=False, persist=False)
     if topic.startswith(f"{TOPIC_ERROR_RTSP}/"):
         return TOPIC_POLICIES[TOPIC_ERROR_RTSP]
     if topic.startswith(f"{TOPIC_ERROR_PIPELINE}/"):

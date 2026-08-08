@@ -3,6 +3,7 @@ topic write system/status/pi4-edge-01
 topic write error/rtsp/pi4-edge-01
 topic write motion/detected
 topic read control/stream/pi4-edge-01
+topic write control/ack/pi4-edge-01
 topic read stream/activity/pi4-edge-01
 
 user aiot-recognition
@@ -14,6 +15,7 @@ topic write stream/activity/pi4-edge-01
 
 user aiot-controller
 topic write control/stream/+
+topic read control/ack/+
 
 user aiot-logger
 topic read recognition/result

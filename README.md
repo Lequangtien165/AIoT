@@ -378,11 +378,12 @@ Set `AIOT_MQTT_PASSWORD` in the terminal environment first, then run:
 python stream_server.py --device "Integrated Camera" --mqtt-host 127.0.0.1 --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-The RTSP publisher emits retained `system/status/<device_id>` heartbeat messages and subscribes only to `control/stream/<device_id>`. A stop command for `pi4-edge-01` uses this JSON payload:
+The persistent edge agent emits retained `system/status/<device_id>` heartbeat messages, publishes command results to `control/ack/<device_id>`, and subscribes only to `control/stream/<device_id>`. Commands use this JSON shape:
 
 ```json
 {
   "schema_version": 1,
+  "command_id": "demo-stop-001",
   "target_device_id": "pi4-edge-01",
   "action": "stop",
   "requested_by": "cloud",
@@ -390,13 +391,21 @@ The RTSP publisher emits retained `system/status/<device_id>` heartbeat messages
 }
 ```
 
-Publish that command to `control/stream/pi4-edge-01`. The publisher validates schema version, topic, and `target_device_id`; commands for other devices are ignored. This MVP implements only `stop`; `start` and `restart` are not claimed as working supervisor actions.
+Publish that command to `control/stream/pi4-edge-01`. The agent validates schema version, command ID, topic, target device, action, and parameter types. The only accepted actions are `status`, `start`, `stop`, and `restart`; MQTT never supplies an executable command string. Reusing a `command_id` returns the original acknowledgement without running the action again.
 
 With the demo broker, publish the command with its authorized controller account:
 
 ```bash
-docker compose exec mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -u aiot-controller -P controller-secret -t control/stream/pi4-edge-01 -m '{"schema_version":1,"target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}'
+docker compose exec mosquitto mosquitto_pub -h 127.0.0.1 -p 1883 -u aiot-controller -P controller-secret -t control/stream/pi4-edge-01 -m '{"schema_version":1,"command_id":"demo-stop-001","target_device_id":"pi4-edge-01","action":"stop","requested_by":"cloud","parameters":{}}'
 ```
+
+Run the persistent agent instead of `stream_server.py` when remote start/stop/restart is required:
+
+```bash
+python scripts/run_edge_agent.py --device /dev/video0 --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ~/aiot-certs/ca.crt --mqtt-client-id pi4-edge-01 --mqtt-username aiot-edge --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+The agent owns the MQTT connection and keeps running while the fixed publisher child is stopped. Its state machine is `offline -> starting -> streaming -> stopping -> stopped`, with `error` entered when the child exits unexpectedly; `start` and `restart` recover from `stopped` or `error`. In `--motion-triggered` mode, the supervised child remains alive as the motion monitor while the camera publisher is started and stopped by the existing session policy. Status payloads include `mode`, child liveness, and RTSP TCP health.
 
 Enable recognition result publishing from **Windows AMD64 Git Bash**:
 
