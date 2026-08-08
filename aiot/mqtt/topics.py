@@ -18,6 +18,7 @@ AUDIT_TOPICS = (
     TOPIC_RECOGNITION_RESULT,
     TOPIC_MOTION_DETECTED,
     "error/#",
+    "control/ack/+",
 )
 
 
@@ -79,7 +80,7 @@ def topic_policy(topic: str) -> TopicPolicy:
     if topic.startswith(f"{TOPIC_CONTROL_STREAM}/"):
         return TOPIC_POLICIES[TOPIC_CONTROL_STREAM]
     if topic.startswith(f"{TOPIC_CONTROL_ACK}/"):
-        return TopicPolicy(qos=1, retain=False, persist=False)
+        return TopicPolicy(qos=1, retain=False, persist=True)
     if topic.startswith(f"{TOPIC_ERROR_RTSP}/"):
         return TOPIC_POLICIES[TOPIC_ERROR_RTSP]
     if topic.startswith(f"{TOPIC_ERROR_PIPELINE}/"):

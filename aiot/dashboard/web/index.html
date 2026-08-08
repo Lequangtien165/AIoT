@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIoT Guard Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <h1>AIoT Guard Console</h1>
+    <div id="device-chips"></div>
+    <div id="alarm-banner" class="hidden">
+      <strong>ALARM</strong> <span id="alarm-text"></span>
+    </div>
+  </header>
+
+  <main id="layout">
+    <section id="video-panel">
+      <div id="video-frame">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="video-status" class="overlay-label">
+          <span id="video-status-text">Connecting video…</span>
+        </div>
+      </div>
+      <div id="video-legend">
+        <span class="legend red">wanted</span>
+        <span class="legend green">match</span>
+        <span class="legend orange">unknown</span>
+        <span class="legend yellow">checking</span>
+        <span class="legend gray">stale</span>
+      </div>
+    </section>
+
+    <aside id="sidebar">
+      <section id="control-panel">
+        <h2>Edge Control</h2>
+        <div class="control-row">
+          <input id="device-input" list="device-list" placeholder="Device id, e.g. pi4-edge-01">
+          <datalist id="device-list"></datalist>
+          <button id="btn-status" disabled>Status</button>
+          <button id="btn-start" disabled>Start</button>
+          <button id="btn-stop" disabled>Stop</button>
+          <button id="btn-restart" disabled>Restart</button>
+        </div>
+        <div id="toast" class="hidden"></div>
+      </section>
+
+      <section id="timeline-panel">
+        <h2>Timeline</h2>
+        <div id="filter-bar">
+          <button class="filter active" data-filter="all">All</button>
+          <button class="filter" data-filter="match">Match</button>
+          <button class="filter" data-filter="unknown">Unknown</button>
+          <button class="filter" data-filter="motion">Motion</button>
+          <button class="filter" data-filter="error">Error</button>
+          <button class="filter" data-filter="command">Command</button>
+        </div>
+        <ul id="timeline"></ul>
+        <button id="btn-load-more">Load older events</button>
+      </section>
+    </aside>
+  </main>
+
+  <div id="detail-drawer" class="hidden">
+    <div id="detail-header">
+      <strong id="detail-title"></strong>
+      <button id="detail-close">×</button>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

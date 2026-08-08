@@ -16,8 +16,18 @@ topic write stream/activity/pi4-edge-01
 user aiot-controller
 topic write control/stream/+
 topic read control/ack/+
+topic read system/status/+
 
 user aiot-logger
 topic read recognition/result
 topic read motion/detected
 topic read error/#
+topic read control/ack/+
+
+user aiot-dashboard
+topic read recognition/result
+topic read motion/detected
+topic read error/#
+topic read system/status/+
+topic read control/ack/+
+topic write control/stream/+
