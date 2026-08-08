@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import queue
 import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from aiot.mqtt import payloads
-from aiot.mqtt.client import MqttClient, password_from_env
+from aiot.mqtt.client import MqttClient, MqttPublishError, password_from_env
 from aiot.mqtt.topics import (
     TOPIC_CONTROL_STREAM,
     control_ack_topic,
@@ -31,15 +33,39 @@ from aiot.streaming.edge_supervisor import (
     CommandValidationError,
     validate_command,
 )
+from aiot.streaming.profiles import (
+    PROFILE_CHOICES,
+    RPI_CSI,
+    ProfileValidationError,
+    profile_uses_ffmpeg,
+    resolve_profile,
+)
+from aiot.streaming.rtsp_probe import probe_rtsp_stream
 from aiot.streaming.stream_settings import RTSP_HOST, RTSP_PORT
 
 
 STREAM_SERVER = PROJECT_ROOT / "stream_server.py"
 
 
+@dataclass(frozen=True)
+class InvalidCommand:
+    command_id: str
+    action: str
+    error: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Persistently supervise the edge RTSP publisher.")
-    parser.add_argument("--device", required=True)
+    parser.add_argument("--device", help="Camera input; required for FFmpeg-based profiles, ignored by rpi-csi.")
+    parser.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        help=(
+            "Explicit capture/deployment profile; auto-detected by default "
+            "(dshow on Windows, avfoundation on macOS, v4l2 on Linux). "
+            "rpi-csi is never auto-detected and requires no --device."
+        ),
+    )
     parser.add_argument("--motion-triggered", action="store_true")
     parser.add_argument("--motion-device")
     parser.add_argument("--framerate", type=int, default=30)
@@ -60,21 +86,36 @@ def parse_args() -> argparse.Namespace:
             parser.error(str(error))
     if args.mqtt_port <= 0 or args.heartbeat_interval <= 0:
         parser.error("--mqtt-port and --heartbeat-interval must be positive")
+    try:
+        profile = resolve_profile(args.profile, platform.system(), platform.machine())
+    except ProfileValidationError as error:
+        parser.error(str(error))
+    if profile == RPI_CSI and args.motion_triggered:
+        parser.error(
+            "--motion-triggered is not supported with the rpi-csi profile; "
+            "MediaMTX owns the camera through libcamera. Use the v4l2 profile "
+            "with a USB camera."
+        )
+    if profile_uses_ffmpeg(profile) and not args.device:
+        parser.error(f"--device is required for the {profile} profile")
+    args.profile = profile
     return args
 
 
 class EdgeAgent:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.commands: queue.Queue[EdgeCommand] = queue.Queue()
+        self.commands: queue.Queue[EdgeCommand | InvalidCommand] = queue.Queue()
         self.process: subprocess.Popen[bytes] | None = None
         self.client: MqttClient | None = None
+        self._first_connect = True
         self.supervisor = EdgeSupervisor(
             device_id=args.mqtt_client_id,
             start_runtime=self.start_runtime,
             stop_runtime=self.stop_runtime,
             runtime_alive=self.runtime_alive,
-            rtsp_healthy=self.rtsp_healthy,
+            rtsp_healthy=self.rtsp_port_open,
+            stream_active=self.rtsp_stream_active,
             mode="motion-triggered" if args.motion_triggered else "continuous",
         )
 
@@ -83,15 +124,21 @@ class EdgeAgent:
             sys.executable,
             str(STREAM_SERVER),
             "--no-mqtt",
-            "--device",
-            self.args.device,
-            "--framerate",
-            str(self.args.framerate),
-            "--video-size",
-            self.args.video_size,
-            "--bitrate",
-            self.args.bitrate,
+            "--profile",
+            self.args.profile,
         ]
+        if self.args.device:
+            command.extend(["--device", self.args.device])
+        command.extend(
+            [
+                "--framerate",
+                str(self.args.framerate),
+                "--video-size",
+                self.args.video_size,
+                "--bitrate",
+                self.args.bitrate,
+            ]
+        )
         if self.args.motion_triggered:
             command.append("--motion-triggered")
         if self.args.motion_device:
@@ -102,11 +149,15 @@ class EdgeAgent:
         if self.runtime_alive():
             return
         self.process = subprocess.Popen(self.publisher_command(), cwd=PROJECT_ROOT)
+        require_stream = not self.args.motion_triggered
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"publisher exited during startup with code {self.process.returncode}")
-            if self.rtsp_healthy():
+            if require_stream:
+                if self.rtsp_stream_active():
+                    return
+            elif self.rtsp_port_open():
                 return
             time.sleep(0.1)
         raise RuntimeError("RTSP endpoint did not become reachable during startup")
@@ -114,7 +165,32 @@ class EdgeAgent:
     def stop_runtime(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
+        if sys.platform.startswith("win"):
+            self._terminate_tree_windows()
+        else:
+            self._terminate_posix()
+
+    def _terminate_posix(self) -> None:
         self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+
+    def _terminate_tree_windows(self) -> None:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            self._terminate_posix()
+            return
+        if result.returncode != 0:
+            self._terminate_posix()
+            return
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -124,7 +200,7 @@ class EdgeAgent:
     def runtime_alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def rtsp_healthy(self) -> bool:
+    def rtsp_port_open(self) -> bool:
         if not self.runtime_alive():
             return False
         try:
@@ -133,16 +209,24 @@ class EdgeAgent:
         except OSError:
             return False
 
+    def rtsp_stream_active(self) -> bool:
+        if not self.runtime_alive():
+            return False
+        return probe_rtsp_stream(RTSP_HOST, RTSP_PORT, timeout=0.5)
+
     def publish(self, topic: str, message: dict, *, retain: bool | None = None) -> None:
         if self.client is None:
             return
         policy = topic_policy(topic)
-        self.client.publish(
-            topic,
-            message,
-            qos=policy.qos,
-            retain=policy.retain if retain is None else retain,
-        )
+        try:
+            self.client.publish(
+                topic,
+                message,
+                qos=policy.qos,
+                retain=policy.retain if retain is None else retain,
+            )
+        except MqttPublishError as error:
+            print(f"[MQTT] {error}", file=sys.stderr)
 
     def publish_status(self, message: str | None = None) -> None:
         self.supervisor.observe_runtime()
@@ -158,6 +242,7 @@ class EdgeAgent:
                     "mode": status["mode"],
                     "runtime_alive": status["runtime_alive"],
                     "rtsp_healthy": status["rtsp_healthy"],
+                    "rtsp_stream_active": status.get("rtsp_stream_active"),
                     "publisher_pid": self.process.pid if self.process else None,
                     "rtsp_url": f"rtsp://{RTSP_HOST}:{RTSP_PORT}/camera",
                 },
@@ -170,18 +255,38 @@ class EdgeAgent:
         try:
             command = validate_command(message, self.args.mqtt_client_id)
         except CommandValidationError as error:
-            self.publish(
-                control_ack_topic(self.args.mqtt_client_id),
-                payloads.command_ack(
-                    command_id=str(message.get("command_id", "")) if isinstance(message, dict) else "",
-                    target_device_id=self.args.mqtt_client_id,
-                    action=str(message.get("action", "unknown")) if isinstance(message, dict) else "unknown",
-                    result="failed",
-                    message=str(error),
-                ),
-            )
+            command_id = message.get("command_id", "") if isinstance(message, dict) else ""
+            action = message.get("action", "unknown") if isinstance(message, dict) else "unknown"
+            self.commands.put(InvalidCommand(str(command_id), str(action), str(error)))
             return
         self.commands.put(command)
+
+    def process_command(self, command: EdgeCommand | InvalidCommand) -> None:
+        if isinstance(command, InvalidCommand):
+            ack = payloads.command_ack(
+                command_id=command.command_id,
+                target_device_id=self.args.mqtt_client_id,
+                action=command.action,
+                result="failed",
+                message=command.error,
+                state=self.supervisor.state.value,
+            )
+            self.publish(control_ack_topic(self.args.mqtt_client_id), ack)
+            return
+        ack = self.supervisor.handle(command)
+        self.publish(control_ack_topic(self.args.mqtt_client_id), ack)
+        self.publish_status(ack.get("message"))
+
+    def on_connection_state(self, state: str) -> None:
+        if state != "connected":
+            return
+        if self._first_connect:
+            self._first_connect = False
+            return
+        try:
+            self.publish_status()
+        except Exception as error:
+            print(f"[MQTT] status republish after reconnect failed: {error}", file=sys.stderr)
 
     def connect(self) -> None:
         self.client = MqttClient(
@@ -192,6 +297,7 @@ class EdgeAgent:
             password=password_from_env(self.args.mqtt_username, self.args.mqtt_password_env),
             ca_cert=self.args.mqtt_ca_cert,
             on_message=self.on_message,
+            on_connection_state=self.on_connection_state,
         )
         self.client.connect()
         self.client.subscribe(
@@ -199,24 +305,26 @@ class EdgeAgent:
             qos=topic_policy(TOPIC_CONTROL_STREAM).qos,
         )
 
+    def start_publisher(self) -> None:
+        self.supervisor.machine.transition(EdgeState.STARTING)
+        try:
+            self.start_runtime()
+            self.supervisor.machine.transition(EdgeState.STREAMING)
+        except Exception as error:
+            self.supervisor.machine.transition(EdgeState.ERROR)
+            self.publish(
+                error_rtsp_topic(self.args.mqtt_client_id),
+                payloads.error_event(
+                    component="edge-agent",
+                    device_id=self.args.mqtt_client_id,
+                    message=str(error),
+                ),
+            )
+
     def run(self) -> int:
         self.connect()
         try:
-            self.supervisor.machine.transition(EdgeState.STARTING)
-            self.publish_status("edge agent is starting the publisher")
-            try:
-                self.start_runtime()
-                self.supervisor.machine.transition(EdgeState.STREAMING)
-            except Exception as error:
-                self.supervisor.machine.transition(EdgeState.ERROR)
-                self.publish(
-                    error_rtsp_topic(self.args.mqtt_client_id),
-                    payloads.error_event(
-                        component="edge-agent",
-                        device_id=self.args.mqtt_client_id,
-                        message=str(error),
-                    ),
-                )
+            self.start_publisher()
             self.publish_status()
             next_heartbeat = time.monotonic() + self.args.heartbeat_interval
             while True:
@@ -225,9 +333,7 @@ class EdgeAgent:
                 except queue.Empty:
                     command = None
                 if command is not None:
-                    ack = self.supervisor.handle(command)
-                    self.publish(control_ack_topic(self.args.mqtt_client_id), ack)
-                    self.publish_status(ack.get("message"))
+                    self.process_command(command)
                 if time.monotonic() >= next_heartbeat:
                     self.publish_status()
                     next_heartbeat = time.monotonic() + self.args.heartbeat_interval

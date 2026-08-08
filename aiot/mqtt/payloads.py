@@ -153,8 +153,9 @@ def command_ack(
     action: str,
     result: str,
     message: str,
+    state: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    ack = {
         "schema_version": SCHEMA_VERSION,
         "ts_ms": now_ms(),
         "command_id": command_id,
@@ -163,6 +164,9 @@ def command_ack(
         "result": result,
         "message": message,
     }
+    if state is not None:
+        ack["state"] = state
+    return ack
 
 
 def face_presence(*, device_id: str, stream_session_id: str, face_count: int) -> dict[str, Any]:

@@ -90,9 +90,21 @@ class PayloadBuilderTests(unittest.TestCase):
             action="status",
             result="succeeded",
             message="status returned",
+            state="streaming",
         )
         self.assertEqual(message["command_id"], "cmd-1")
+        self.assertEqual(message["state"], "streaming")
         self.assertEqual(control_ack_topic("edge-1"), "control/ack/edge-1")
+
+    def test_command_ack_omits_state_when_unspecified(self):
+        message = payloads.command_ack(
+            command_id="cmd-2",
+            target_device_id="edge-1",
+            action="stop",
+            result="succeeded",
+            message="runtime stopped",
+        )
+        self.assertNotIn("state", message)
 
     def test_face_presence_has_session_and_face_count(self):
         message = payloads.face_presence(device_id="edge-1", stream_session_id="session-1", face_count=1)
@@ -152,6 +164,16 @@ class MqttClientTests(unittest.TestCase):
             client.publish("recognition/result", {"schema_version": 1}, qos=1)
 
     @patch("aiot.mqtt.client._load_mqtt_module")
+    def test_publish_raises_when_broker_rejects_with_reason_code(self, load_mqtt):
+        fake_module = FakeMqttModule(connect_reason=0, publish_reason=135)
+        load_mqtt.return_value = fake_module
+        client = MqttClient(host="127.0.0.1", port=1883, client_id="test")
+        client.connect(timeout=0.1)
+
+        with self.assertRaises(MqttPublishError):
+            client.publish("control/stream/test", {"schema_version": 1}, qos=1)
+
+    @patch("aiot.mqtt.client._load_mqtt_module")
     def test_connect_raises_when_subscription_is_rejected(self, load_mqtt):
         fake_module = FakeMqttModule(connect_reason=0, subscription_reason=135)
         load_mqtt.return_value = fake_module
@@ -160,6 +182,15 @@ class MqttClientTests(unittest.TestCase):
 
         with self.assertRaises(MqttSubscriptionError):
             client.connect(timeout=0.1)
+
+    @patch("aiot.mqtt.client._load_mqtt_module")
+    def test_client_uses_mqttv5_for_publish_reason_codes(self, load_mqtt):
+        fake_module = FakeMqttModule(connect_reason=0)
+        load_mqtt.return_value = fake_module
+
+        MqttClient(host="127.0.0.1", port=1883, client_id="test")
+
+        self.assertEqual(fake_module.last_client.protocol, 5)
 
     @patch("aiot.mqtt.client._load_mqtt_module")
     def test_client_configures_tls_with_the_supplied_ca_certificate(self, load_mqtt):
@@ -172,8 +203,9 @@ class MqttClientTests(unittest.TestCase):
 
 
 class FakePublishInfo:
-    def __init__(self, rc: int, completed: bool) -> None:
+    def __init__(self, rc: int, completed: bool, mid: int = 1) -> None:
         self.rc = rc
+        self.mid = mid
         self.completed = completed
 
     def wait_for_publish(self, timeout: float | None = None) -> None:
@@ -184,11 +216,14 @@ class FakePublishInfo:
 
 
 class FakePahoClient:
-    def __init__(self, module, **_kwargs) -> None:
+    def __init__(self, module, **kwargs) -> None:
         self.module = module
+        self.protocol = kwargs.get("protocol", 4)
         self.on_connect = None
         self.on_disconnect = None
         self.on_message = None
+        self.on_subscribe = None
+        self.on_publish = None
         self.subscriptions = []
         self.tls_ca_cert = None
 
@@ -222,11 +257,15 @@ class FakePahoClient:
         return self.module.MQTT_ERR_SUCCESS, mid
 
     def publish(self, _topic, _payload, qos: int = 0, retain: bool = False) -> FakePublishInfo:
-        return FakePublishInfo(self.module.publish_rc, self.module.publish_completed)
+        info = FakePublishInfo(self.module.publish_rc, self.module.publish_completed)
+        if self.on_publish is not None:
+            self.on_publish(self, None, info.mid, self.module.publish_reason, None)
+        return info
 
 
 class FakeMqttModule:
     MQTT_ERR_SUCCESS = 0
+    MQTTv5 = 5
 
     class CallbackAPIVersion:
         VERSION2 = object()
@@ -236,11 +275,13 @@ class FakeMqttModule:
         *,
         connect_reason: int | None,
         publish_rc: int = 0,
+        publish_reason: int = 0,
         publish_completed: bool = True,
         subscription_reason: int = 0,
     ) -> None:
         self.connect_reason = connect_reason
         self.publish_rc = publish_rc
+        self.publish_reason = publish_reason
         self.publish_completed = publish_completed
         self.subscription_reason = subscription_reason
         self.last_client = None

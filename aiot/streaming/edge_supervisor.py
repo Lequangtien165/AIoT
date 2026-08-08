@@ -100,12 +100,14 @@ class EdgeSupervisor:
         runtime_alive: Callable[[], bool],
         rtsp_healthy: Callable[[], bool],
         mode: str = "continuous",
+        stream_active: Callable[[], bool] | None = None,
     ) -> None:
         self.device_id = device_id
         self.start_runtime = start_runtime
         self.stop_runtime = stop_runtime
         self.runtime_alive = runtime_alive
         self.rtsp_healthy = rtsp_healthy
+        self.stream_active = stream_active
         self.mode = mode
         self.machine = EdgeStateMachine()
         self._handled_commands: dict[str, dict[str, Any]] = {}
@@ -116,68 +118,84 @@ class EdgeSupervisor:
         return self.machine.state
 
     def status(self) -> dict[str, Any]:
-        return {
+        status = {
             "state": self.state.value,
             "mode": self.mode,
             "runtime_alive": self.runtime_alive(),
             "rtsp_healthy": self.rtsp_healthy(),
         }
+        if self.stream_active is not None:
+            status["rtsp_stream_active"] = self.stream_active()
+        return status
 
     def handle(self, command: EdgeCommand) -> dict[str, Any]:
         previous = self._handled_commands.get(command.command_id)
         if previous is not None:
             return previous
+        self.observe_runtime()
 
         if command.action == "status":
             result = self._ack(command, "succeeded", "status returned")
-            result["status"] = self.status()
-            self._handled_commands[command.command_id] = result
-            return result
-
-        if command.action == "stop":
-            if self.state in {EdgeState.OFFLINE, EdgeState.STOPPED, EdgeState.STOPPING}:
-                if self.state == EdgeState.OFFLINE:
-                    self.machine.transition(EdgeState.STOPPED)
-                result = self._ack(command, "succeeded", "runtime is already stopped")
-            else:
-                self.machine.transition(EdgeState.STOPPING)
-                self._requested_stop = True
-                self.stop_runtime()
-                self.machine.transition(EdgeState.STOPPED)
-                result = self._ack(command, "succeeded", "runtime stopped")
+        elif command.action == "stop":
+            result = self._handle_stop(command)
         elif command.action == "start":
-            if self.state in {EdgeState.STARTING, EdgeState.STREAMING}:
-                result = self._ack(command, "succeeded", "runtime is already started")
-            else:
-                self.machine.transition(EdgeState.STARTING)
-                self._requested_stop = False
-                try:
-                    self.start_runtime()
-                    self.machine.transition(EdgeState.STREAMING)
-                    result = self._ack(command, "succeeded", "runtime started")
-                except Exception as error:
-                    self.machine.transition(EdgeState.ERROR)
-                    result = self._ack(command, "failed", str(error))
-        else:  # restart
-            if self.state not in {EdgeState.OFFLINE, EdgeState.STOPPED, EdgeState.ERROR}:
-                self.machine.transition(EdgeState.STOPPING)
-                self.stop_runtime()
-                self.machine.transition(EdgeState.STOPPED)
-            self.machine.transition(EdgeState.STARTING)
-            self._requested_stop = False
-            try:
-                self.start_runtime()
-                self.machine.transition(EdgeState.STREAMING)
-                result = self._ack(command, "succeeded", "runtime restarted")
-            except Exception as error:
-                self.machine.transition(EdgeState.ERROR)
-                result = self._ack(command, "failed", str(error))
+            result = self._handle_start(command)
+        else:
+            result = self._handle_restart(command)
 
         result["status"] = self.status()
         self._handled_commands[command.command_id] = result
         if len(self._handled_commands) > 256:
             del self._handled_commands[next(iter(self._handled_commands))]
         return result
+
+    def _handle_stop(self, command: EdgeCommand) -> dict[str, Any]:
+        if self.state in {EdgeState.OFFLINE, EdgeState.STOPPED, EdgeState.STOPPING}:
+            if self.state == EdgeState.OFFLINE:
+                self.machine.transition(EdgeState.STOPPED)
+            return self._ack(command, "succeeded", "runtime is already stopped")
+        self.machine.transition(EdgeState.STOPPING)
+        self._requested_stop = True
+        try:
+            self.stop_runtime()
+        except Exception as error:
+            self.machine.transition(EdgeState.ERROR)
+            return self._ack(command, "failed", str(error))
+        self.machine.transition(EdgeState.STOPPED)
+        return self._ack(command, "succeeded", "runtime stopped")
+
+    def _handle_start(self, command: EdgeCommand) -> dict[str, Any]:
+        if self.state in {EdgeState.STARTING, EdgeState.STREAMING}:
+            return self._ack(command, "succeeded", "runtime is already started")
+        self.machine.transition(EdgeState.STARTING)
+        self._requested_stop = False
+        try:
+            self.start_runtime()
+        except Exception as error:
+            self.machine.transition(EdgeState.ERROR)
+            return self._ack(command, "failed", str(error))
+        self.machine.transition(EdgeState.STREAMING)
+        return self._ack(command, "succeeded", "runtime started")
+
+    def _handle_restart(self, command: EdgeCommand) -> dict[str, Any]:
+        if self.state not in {EdgeState.OFFLINE, EdgeState.STOPPED, EdgeState.ERROR}:
+            self.machine.transition(EdgeState.STOPPING)
+            self._requested_stop = True
+            try:
+                self.stop_runtime()
+            except Exception as error:
+                self.machine.transition(EdgeState.ERROR)
+                return self._ack(command, "failed", str(error))
+            self.machine.transition(EdgeState.STOPPED)
+        self.machine.transition(EdgeState.STARTING)
+        self._requested_stop = False
+        try:
+            self.start_runtime()
+        except Exception as error:
+            self.machine.transition(EdgeState.ERROR)
+            return self._ack(command, "failed", str(error))
+        self.machine.transition(EdgeState.STREAMING)
+        return self._ack(command, "succeeded", "runtime restarted")
 
     def observe_runtime(self) -> EdgeState:
         if self.state in {EdgeState.STARTING, EdgeState.STREAMING} and not self.runtime_alive():
@@ -194,4 +212,5 @@ class EdgeSupervisor:
             action=command.action,
             result=result,
             message=message,
+            state=self.state.value,
         )
