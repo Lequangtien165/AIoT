@@ -2,6 +2,8 @@
 
 
 
+from __future__ import annotations
+
 from collections import defaultdict
 from pathlib import Path
 import argparse
@@ -9,10 +11,7 @@ import json
 import sys
 
 import cv2
-import faiss
 import numpy as np
-
-from aiot.recognition.face_engine import FaceEngine
 
 
 # Prevent non-ASCII output from failing on legacy Windows code pages.
@@ -29,9 +28,11 @@ DEFAULT_THRESHOLD = 0.45
 
 
 def load_database() -> tuple[
-    faiss.Index,
+    "faiss.Index",
     list[dict],
 ]:
+    import faiss
+
     if not INDEX_PATH.exists():
         raise FileNotFoundError(
             "FAISS index was not found. "
@@ -66,6 +67,10 @@ def recognize(
     threshold: float,
     top_k: int,
 ) -> None:
+    import faiss
+
+    from aiot.recognition.face_engine import FaceEngine
+
     index, metadata = load_database()
     engine = FaceEngine()
 
@@ -171,7 +176,7 @@ def recognize(
         )
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Recognize faces with InsightFace + FAISS."
@@ -201,6 +206,11 @@ def main() -> None:
         help="Number of nearest vectors to retrieve.",
     )
 
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.image.exists():
