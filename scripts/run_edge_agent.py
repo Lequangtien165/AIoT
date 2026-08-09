@@ -154,6 +154,10 @@ class EdgeAgent:
             sys.executable,
             str(STREAM_SERVER),
             "--no-mqtt",
+            # The child has no MQTT connection, but still uses this identity to
+            # validate face-presence messages forwarded over the local channel.
+            "--mqtt-client-id",
+            self.args.mqtt_client_id,
             "--profile",
             self.args.profile,
         ]

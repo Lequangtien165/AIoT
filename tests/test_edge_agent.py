@@ -44,6 +44,7 @@ class PublisherCommandTests(unittest.TestCase):
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1], str(STREAM_SERVER))
         self.assertIn("--no-mqtt", command)
+        self.assertEqual(command[command.index("--mqtt-client-id") + 1], "pi4-edge-01")
         self.assertEqual(command[command.index("--profile") + 1], "dshow")
         self.assertEqual(command[command.index("--device") + 1], "Camera A")
         self.assertEqual(command[command.index("--framerate") + 1], "30")
