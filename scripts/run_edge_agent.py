@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import queue
 import socket
@@ -20,10 +21,12 @@ from aiot.mqtt import payloads
 from aiot.mqtt.client import MqttClient, MqttPublishError, password_from_env
 from aiot.mqtt.topics import (
     TOPIC_CONTROL_STREAM,
+    TOPIC_MOTION_DETECTED,
     control_ack_topic,
     control_stream_topic,
     error_rtsp_topic,
     system_status_topic,
+    stream_activity_topic,
     topic_policy,
 )
 from aiot.streaming.edge_supervisor import (
@@ -33,6 +36,7 @@ from aiot.streaming.edge_supervisor import (
     CommandValidationError,
     validate_command,
 )
+from aiot.streaming.agent_channel import AgentChannelServer
 from aiot.streaming.profiles import (
     PROFILE_CHOICES,
     RPI_CSI,
@@ -68,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--motion-triggered", action="store_true", help="Start RTSP sessions only after significant motion.")
     parser.add_argument("--motion-device", help="OpenCV camera index/path used while monitoring; defaults to --device.")
+    parser.add_argument("--motion-width", type=int, default=320, help="Motion monitor width (default: 320).")
+    parser.add_argument("--motion-height", type=int, default=240, help="Motion monitor height (default: 240).")
+    parser.add_argument("--motion-fps", type=float, default=5.0, help="Motion monitor frame rate (default: 5.0).")
+    parser.add_argument("--motion-area-threshold", type=float, default=0.02, help="Changed-pixel fraction that counts as motion (default: 0.02).")
+    parser.add_argument("--motion-window-size", type=int, default=5, help="Motion decision window in frames (default: 5).")
+    parser.add_argument("--motion-trigger-frames", type=int, default=3, help="Motion frames required within the window (default: 3).")
+    parser.add_argument("--motion-warmup", type=float, default=2.0, help="Seconds of background calibration before monitoring (default: 2.0).")
+    parser.add_argument("--face-discovery-timeout", type=float, default=30.0, help="Seconds to wait for the first face presence (default: 30.0).")
+    parser.add_argument("--face-keepalive-timeout", type=float, default=120.0, help="Face-presence session lease in seconds (default: 120.0).")
     parser.add_argument("--framerate", type=int, default=30, help="Requested camera frame rate (default: 30).")
     parser.add_argument("--video-size", default="1280x720", help="Requested size (default: 1280x720).")
     parser.add_argument("--bitrate", default="2M", help="H.264 bitrate (default: 2M).")
@@ -91,6 +104,14 @@ def parse_args() -> argparse.Namespace:
             parser.error(str(error))
     if args.mqtt_port <= 0 or args.heartbeat_interval <= 0:
         parser.error("--mqtt-port and --heartbeat-interval must be positive")
+    if args.motion_width <= 0 or args.motion_height <= 0 or args.motion_fps <= 0:
+        parser.error("motion width, height, and fps must be positive")
+    if not 0 < args.motion_area_threshold <= 1 or args.motion_window_size <= 0:
+        parser.error("motion area threshold must be in (0, 1] and window size must be positive")
+    if not 0 < args.motion_trigger_frames <= args.motion_window_size:
+        parser.error("motion trigger frames must be within the motion window")
+    if args.motion_warmup < 0 or args.face_discovery_timeout <= 0 or args.face_keepalive_timeout <= 0:
+        parser.error("motion warmup must be non-negative and session timeouts must be positive")
     try:
         profile = resolve_profile(args.profile, platform.system(), platform.machine())
     except ProfileValidationError as error:
@@ -114,6 +135,10 @@ class EdgeAgent:
         self.process: subprocess.Popen[bytes] | None = None
         self.client: MqttClient | None = None
         self._first_connect = True
+        self.channel = AgentChannelServer(self.on_child_event)
+        self.session_id: str | None = None
+        self.session_state = "monitoring"
+        self.motion_active = False
         self.supervisor = EdgeSupervisor(
             device_id=args.mqtt_client_id,
             start_runtime=self.start_runtime,
@@ -148,12 +173,21 @@ class EdgeAgent:
             command.append("--motion-triggered")
         if self.args.motion_device:
             command.extend(["--motion-device", self.args.motion_device])
+        command.extend([
+            "--motion-width", str(getattr(self.args, "motion_width", 320)), "--motion-height", str(getattr(self.args, "motion_height", 240)),
+            "--motion-fps", str(getattr(self.args, "motion_fps", 5.0)), "--motion-area-threshold", str(getattr(self.args, "motion_area_threshold", 0.02)),
+            "--motion-window-size", str(getattr(self.args, "motion_window_size", 5)), "--motion-trigger-frames", str(getattr(self.args, "motion_trigger_frames", 3)),
+            "--motion-warmup", str(getattr(self.args, "motion_warmup", 2.0)), "--face-discovery-timeout", str(getattr(self.args, "face_discovery_timeout", 30.0)),
+            "--face-keepalive-timeout", str(getattr(self.args, "face_keepalive_timeout", 120.0)),
+        ])
         return command
 
     def start_runtime(self) -> None:
         if self.runtime_alive():
             return
-        self.process = subprocess.Popen(self.publisher_command(), cwd=PROJECT_ROOT)
+        environment = os.environ.copy()
+        environment.update(self.channel.child_environment())
+        self.process = subprocess.Popen(self.publisher_command(), cwd=PROJECT_ROOT, env=environment)
         require_stream = not self.args.motion_triggered
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
@@ -236,25 +270,64 @@ class EdgeAgent:
     def publish_status(self, message: str | None = None) -> None:
         self.supervisor.observe_runtime()
         status = self.supervisor.status()
+        published_state = status["state"]
+        if self.args.motion_triggered and status["runtime_alive"]:
+            published_state = self.session_state
         self.publish(
             system_status_topic(self.args.mqtt_client_id),
             payloads.system_status(
                 device_id=self.args.mqtt_client_id,
                 component="edge-agent",
-                state=status["state"],
+                state=published_state,
                 message=message,
                 metrics={
                     "mode": status["mode"],
                     "runtime_alive": status["runtime_alive"],
                     "rtsp_healthy": status["rtsp_healthy"],
                     "rtsp_stream_active": status.get("rtsp_stream_active"),
+                    "session_phase": self.session_state,
+                    "motion_active": self.motion_active,
                     "publisher_pid": self.process.pid if self.process else None,
                     "rtsp_url": f"rtsp://{RTSP_HOST}:{RTSP_PORT}/camera",
                 },
+                stream_session_id=self.session_id,
             ),
         )
 
+    def on_child_event(self, event: dict) -> None:
+        """Relay trusted loopback child lifecycle events through MQTT."""
+        event_type = event.get("type")
+        if event_type == "motion" and isinstance(event.get("active"), bool):
+            self.motion_active = event["active"]
+            self.publish(
+                TOPIC_MOTION_DETECTED,
+                payloads.motion_detected(device_id=self.args.mqtt_client_id, sensor_id="software-motion", active=self.motion_active),
+            )
+            return
+        if event_type == "session" and event.get("state") in {"starting", "streaming", "monitoring"}:
+            self.session_state = event["state"]
+            session_id = event.get("stream_session_id")
+            self.session_id = session_id if isinstance(session_id, str) else None
+            self.publish_status(f"publisher session {self.session_state}")
+            return
+        if event_type == "runtime_error" and isinstance(event.get("message"), str):
+            self.publish(
+                error_rtsp_topic(self.args.mqtt_client_id),
+                payloads.error_event(component="rtsp-publisher", device_id=self.args.mqtt_client_id, message=event["message"]),
+            )
+
     def on_message(self, topic: str, message: dict) -> None:
+        if topic == stream_activity_topic(self.args.mqtt_client_id):
+            if (
+                message.get("schema_version") == payloads.SCHEMA_VERSION
+                and message.get("device_id") == self.args.mqtt_client_id
+                and message.get("action") == "face_presence"
+                and isinstance(message.get("stream_session_id"), str)
+                and isinstance(message.get("face_count"), int)
+                and not isinstance(message.get("face_count"), bool)
+            ):
+                self.channel.send({"type": "face_presence", **message})
+            return
         if topic != control_stream_topic(self.args.mqtt_client_id):
             return
         try:
@@ -309,6 +382,8 @@ class EdgeAgent:
             control_stream_topic(self.args.mqtt_client_id),
             qos=topic_policy(TOPIC_CONTROL_STREAM).qos,
         )
+        if self.args.motion_triggered:
+            self.client.subscribe(stream_activity_topic(self.args.mqtt_client_id), qos=1)
 
     def start_publisher(self) -> None:
         self.supervisor.machine.transition(EdgeState.STARTING)
@@ -346,6 +421,7 @@ class EdgeAgent:
             return 0
         finally:
             self.stop_runtime()
+            self.channel.close()
             if self.client is not None:
                 self.client.close()
 
