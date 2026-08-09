@@ -123,6 +123,53 @@ reports `state=streaming`. Feed the RTSP relay to the recognizer too:
 rtsp://<EDGE_LAN_IP>:8554/camera
 ```
 
+For full dashboard control (start/stop/restart with acks, retained status,
+heartbeat, crash respawn) run the persistent edge agent instead of the raw
+publisher: the agent supervises `stream_server.py --no-mqtt` as a child, so a
+dashboard `stop` actually kills and a later `restart` respawns the publisher —
+the raw `stream_server.py` above can only stop itself and then exits for good.
+
+```bash
+export AIOT_EDGE_PASSWORD='<edge-password>'
+python scripts/run_edge_agent.py \
+  --device /dev/video0 \
+  --mqtt-host <BROKER_LAN_IP> \
+  --mqtt-port 8883 \
+  --mqtt-ca-cert ~/aiot-certs/ca.crt \
+  --mqtt-client-id pi4-edge-01 \
+  --mqtt-username aiot-edge \
+  --mqtt-password-env AIOT_EDGE_PASSWORD \
+  --heartbeat-interval 5
+```
+
+Motion-triggered sessions are opt-in and work on any FFmpeg profile
+(`v4l2`/`dshow`/`avfoundation`); they are rejected with `rpi-csi` because
+MediaMTX owns the CSI camera through libcamera:
+
+```bash
+python scripts/run_edge_agent.py \
+  --device /dev/video0 \
+  --motion-triggered \
+  --mqtt-host <BROKER_LAN_IP> \
+  --mqtt-port 8883 \
+  --mqtt-ca-cert ~/aiot-certs/ca.crt \
+  --mqtt-client-id pi4-edge-01 \
+  --mqtt-username aiot-edge \
+  --mqtt-password-env AIOT_EDGE_PASSWORD \
+  --face-discovery-timeout 30 \
+  --face-keepalive-timeout 120 \
+  --heartbeat-interval 5
+```
+
+`--motion-device` defaults to `--device`; on Windows/macOS it must be an OpenCV
+camera index. The agent only waits for the RTSP port in motion mode, because
+the stream is off while idle and starts on the first detected motion.
+
+The agent is the sole MQTT client for its publisher child: it relays
+`motion/detected` active/clear events and validates then forwards cloud
+`face_presence` leases. Do not add `--no-mqtt` or run a second publisher beside
+the agent.
+
 ### 2b.4 Cloud recognition, logger, dashboard (Windows laptop)
 
 Run each in its own terminal. Every component uses the same
@@ -137,6 +184,7 @@ python recognize_stream.py `
   --require-gpu `
   --no-mirror `
   --snapshot-dir .\snapshots `
+  --edge-triggered-session --face-presence-interval 15 `
   --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
   --mqtt-ca-cert config\mosquitto\certs\ca.crt `
   --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
@@ -162,6 +210,7 @@ $env:AIOT_MQTT_PASSWORD='<dashboard-password>'
 python scripts\run_dashboard.py `
   --host 0.0.0.0 --port 8080 `
   --video-url http://<MEDIAMTX_HOST>:8889 `
+  --video-device-id pi4-edge-01 `
   --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
   --mqtt-ca-cert config\mosquitto\certs\ca.crt `
   --mqtt-client-id aiot-dashboard `
@@ -195,7 +244,9 @@ the install command to fix it; exit code 1 on failure.
 
 Supervises `stream_server.py --no-mqtt` as a child and owns the publisher
 process tree. `--device` is required for FFmpeg profiles and ignored by
-`rpi-csi`. `--motion-triggered` is rejected with `rpi-csi`.
+`rpi-csi`. `--motion-triggered` is rejected with `rpi-csi`. The example below
+uses the local plaintext broker; see [2b.3](#2b3-edge-publisher-pi-with-tls)
+for the same agent over the LAN TLS profile on `8883`.
 
 ```powershell
 $env:AIOT_EDGE_PASSWORD='edge-secret'

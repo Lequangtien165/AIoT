@@ -20,8 +20,8 @@ cannot drift. All commands run from the repository root.
 | `python stream_server.py` | Publish a webcam to a MediaMTX RTSP stream; owns MediaMTX and optionally FFmpeg. | Windows, macOS, Linux ARM64 (profile auto-detected; rpi-csi must be explicit) | 25 flags | 0 |
 | `python recognize_stream.py` | Realtime InsightFace + FAISS recognition of an RTSP stream; publishes recognition/result over MQTT. | Windows AMD64 only | 28 flags | 0 |
 | `python recognize_image.py IMAGE` | One-shot image recognition against the FAISS enrollment index. | Windows AMD64 only | 2 flags + 1 positional | 1 |
-| `python scripts/run_edge_agent.py` | Persistent MQTT supervisor that owns a stream_server.py publisher child. | Windows, macOS, Linux ARM64 | 14 flags | 2 |
-| `python scripts/run_dashboard.py` | Web guard console: WebRTC video, recognition overlay, event timeline, edge control. | Windows, macOS (requires requirements-dashboard.txt) | 13 flags | 0 |
+| `python scripts/run_edge_agent.py` | Persistent MQTT supervisor that owns a stream_server.py publisher child. | Windows, macOS, Linux ARM64 | 23 flags | 2 |
+| `python scripts/run_dashboard.py` | Web guard console: WebRTC video, recognition overlay, event timeline, edge control. | Windows, macOS (requires requirements-dashboard.txt) | 14 flags | 0 |
 | `python scripts/run_mqtt_logger.py` | Persist recognition/motion/error/ack events to database/audit_log.sqlite3. | Windows, macOS, Linux | 9 flags | 0 |
 | `python scripts/setup_tools.py` | Download, verify, and install the pinned FFmpeg and MediaMTX builds. | Windows, macOS Apple Silicon, Linux ARM64 | 1 flag | 0 |
 
@@ -136,6 +136,15 @@ Platform: Windows, macOS, Linux ARM64.
 | `--profile` | choice | — | no | Explicit capture/deployment profile; auto-detected by default (dshow on Windows, avfoundation on macOS, v4l2 on Linux). rpi-csi is never auto-detected and requires no --device. Choices: `rpi-csi`, `v4l2`, `avfoundation`, `dshow`. |
 | `--motion-triggered` | flag | `false` | no | Start RTSP sessions only after significant motion. |
 | `--motion-device` | str | — | no | OpenCV camera index/path used while monitoring; defaults to --device. |
+| `--motion-width` | int | `320` | no | Motion monitor width (default: 320). |
+| `--motion-height` | int | `240` | no | Motion monitor height (default: 240). |
+| `--motion-fps` | float | `5.0` | no | Motion monitor frame rate (default: 5.0). |
+| `--motion-area-threshold` | float | `0.02` | no | Changed-pixel fraction that counts as motion (default: 0.02). |
+| `--motion-window-size` | int | `5` | no | Motion decision window in frames (default: 5). |
+| `--motion-trigger-frames` | int | `3` | no | Motion frames required within the window (default: 3). |
+| `--motion-warmup` | float | `2.0` | no | Seconds of background calibration before monitoring (default: 2.0). |
+| `--face-discovery-timeout` | float | `30.0` | no | Seconds to wait for the first face presence (default: 30.0). |
+| `--face-keepalive-timeout` | float | `120.0` | no | Face-presence session lease in seconds (default: 120.0). |
 | `--framerate` | int | `30` | no | Requested camera frame rate (default: 30). |
 | `--video-size` | str | `1280x720` | no | Requested size (default: 1280x720). |
 | `--bitrate` | str | `2M` | no | H.264 bitrate (default: 2M). |
@@ -160,6 +169,7 @@ Platform: Windows, macOS (requires requirements-dashboard.txt).
 | `--port` | int | `8080` | no | Dashboard HTTP port (default: 8080). |
 | `--video-url` | str | `http://127.0.0.1:8889` | no | MediaMTX WebRTC base URL for WHEP (default: http://127.0.0.1:8889). |
 | `--video-path` | str | `camera` | no | MediaMTX path to play (default: camera). |
+| `--video-device-id` | str | — | no | Edge device ID that owns --video-path; drives WHEP lifecycle from its status. |
 | `--mqtt-host` | str | `127.0.0.1` | no | MQTT broker host (default: 127.0.0.1). |
 | `--mqtt-port` | int | `1883` | no | MQTT broker port (default: 1883). |
 | `--mqtt-client-id` | str | `aiot-dashboard` | no | MQTT client ID (default: aiot-dashboard). |
@@ -258,13 +268,12 @@ the camera choice for recognition comes from the `--source` RTSP URL.
 
 ### Edge Agent Forwarding Limits
 
-`scripts/run_edge_agent.py` forwards only a subset of the child
-`stream_server.py` options: `--device`, `--profile`, `--framerate`,
-`--video-size`, `--bitrate`, `--motion-triggered`, `--motion-device`. The
-motion tuning flags (`--motion-width/height/fps/area-threshold/window-size/
-trigger-frames/warmup`) and the session timeouts (`--face-discovery-timeout`,
-`--face-keepalive-timeout`) are **not** reachable when the publisher runs
-under the agent; the child silently uses its defaults.
+`scripts/run_edge_agent.py` forwards capture, motion, and session options to
+its `stream_server.py --no-mqtt` child: `--device`, `--profile`,
+`--framerate`, `--video-size`, `--bitrate`, `--motion-triggered`,
+`--motion-device`, all motion tuning flags, and both face-session timeouts.
+The agent remains the sole MQTT client and relays motion/session events plus
+cloud face-presence leases through an authenticated loopback channel.
 
 ## Cross-Process Invariants
 

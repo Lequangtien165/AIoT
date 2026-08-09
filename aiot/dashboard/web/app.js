@@ -31,6 +31,13 @@ const state = {
   alarm: { until: 0, cooldowns: {} },
   ws: null,
   pc: null,
+  videoDesired: true,
+  videoConnecting: false,
+  videoSessionUrl: null,
+  videoLive: false,
+  videoRetry: null,
+  lastVideoTime: -1,
+  lastVideoFrameAt: 0,
 };
 
 const wantedEntryCache = new Map();
@@ -228,15 +235,17 @@ function handleMessage(message) {
   switch (message.type) {
     case "hello":
       state.videoConfig = message.video;
-      connectVideoWithRetry();
+      reconcileVideo();
       break;
     case "status_snapshot":
       state.statuses = message.devices || {};
       renderChips();
+      reconcileVideo();
       break;
     case "status":
       state.statuses[message.topic.split("/").pop()] = message.payload;
       renderChips();
+      reconcileVideo();
       break;
     case "events_snapshot":
       for (const row of (message.events || []).reverse()) {
@@ -475,6 +484,10 @@ function drawLoop() {
     canvas.height = height;
   }
   ctx.clearRect(0, 0, width, height);
+  if (!state.videoLive) {
+    requestAnimationFrame(drawLoop);
+    return;
+  }
   const videoWidth = video.videoWidth || 1;
   const videoHeight = video.videoHeight || 1;
   const scaleX = width / videoWidth;
@@ -489,13 +502,45 @@ function drawLoop() {
 
 /* ---------- WebRTC (WHEP) ---------- */
 
+function stopWhep() {
+  if (state.videoRetry) {
+    clearTimeout(state.videoRetry);
+    state.videoRetry = null;
+  }
+  const sessionUrl = state.videoSessionUrl;
+  state.videoSessionUrl = null;
+  if (state.pc) state.pc.close();
+  state.pc = null;
+  if (sessionUrl) fetch(sessionUrl, { method: "DELETE" }).catch(() => {});
+  el.video.srcObject = null;
+  state.videoLive = false;
+  state.videoConnecting = false;
+}
+
+function scheduleVideoRetry() {
+  if (!state.videoDesired || state.videoRetry || state.videoConnecting) return;
+  state.videoRetry = setTimeout(() => {
+    state.videoRetry = null;
+    connectVideo();
+  }, 2000);
+}
+
 async function startWhep() {
   const endpoint = `${state.videoConfig.url}/${state.videoConfig.path}/whep`;
   const pc = new RTCPeerConnection();
   pc.addTransceiver("video", { direction: "recvonly" });
   pc.ontrack = (event) => {
     el.video.srcObject = event.streams[0];
+    state.lastVideoFrameAt = Date.now();
+    state.videoLive = true;
     setVideoStatus("live");
+  };
+  pc.onconnectionstatechange = () => {
+    if (["failed", "closed"].includes(pc.connectionState) && state.pc === pc) {
+      stopWhep();
+      setVideoStatus("Video disconnected - reconnecting...");
+      scheduleVideoRetry();
+    }
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -504,23 +549,40 @@ async function startWhep() {
     headers: { "Content-Type": "application/sdp" },
     body: offer.sdp,
   });
-  if (!response.ok) throw new Error(`WHEP ${response.status}`);
+  if (response.status !== 201) throw new Error(`WHEP ${response.status}`);
   const answer = await response.text();
   await pc.setRemoteDescription({ type: "answer", sdp: answer });
+  state.videoSessionUrl = new URL(response.headers.get("location") || "", endpoint).toString();
   state.pc = pc;
 }
 
-async function connectVideoWithRetry() {
-  while (true) {
-    try {
-      setVideoStatus("Connecting video…");
-      await startWhep();
-      return;
-    } catch {
-      setVideoStatus("Video unavailable — retrying…");
-      await sleep(5000);
-    }
+async function connectVideo() {
+  if (!state.videoDesired || state.videoConnecting || state.pc || !state.videoConfig) return;
+  state.videoConnecting = true;
+  try {
+    setVideoStatus("Connecting video...");
+    await startWhep();
+  } catch {
+    setVideoStatus("Video unavailable - retrying...");
+    scheduleVideoRetry();
+  } finally {
+    state.videoConnecting = false;
   }
+}
+
+function reconcileVideo() {
+  if (!state.videoConfig) return;
+  const deviceId = state.videoConfig.device_id;
+  const status = deviceId ? state.statuses[deviceId] : null;
+  const active = !status || status.metrics?.rtsp_stream_active === true;
+  if (!active) {
+    state.videoDesired = false;
+    stopWhep();
+    setVideoStatus(status?.state === "monitoring" ? "Waiting for motion..." : "Stream stopped");
+    return;
+  }
+  state.videoDesired = true;
+  connectVideo();
 }
 
 /* ---------- edge control ---------- */
@@ -597,6 +659,19 @@ function init() {
   connectWs();
   drawLoop();
   refreshKnownLabels();
+  setInterval(() => {
+    if (!state.videoLive || !state.videoDesired) return;
+    if (el.video.currentTime !== state.lastVideoTime) {
+      state.lastVideoTime = el.video.currentTime;
+      state.lastVideoFrameAt = Date.now();
+      return;
+    }
+    if (Date.now() - state.lastVideoFrameAt > 5000) {
+      stopWhep();
+      setVideoStatus("Video stalled - reconnecting...");
+      scheduleVideoRetry();
+    }
+  }, 1000);
 }
 
 init();

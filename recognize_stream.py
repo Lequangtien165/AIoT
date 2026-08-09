@@ -86,11 +86,13 @@ class CloudEdgeSession:
             return
         with self._lock:
             if payload.get("state") == "streaming" and isinstance(payload.get("stream_session_id"), str):
-                self.session_id = payload["stream_session_id"]
-                self.last_presence = 0.0
+                next_session_id = payload["stream_session_id"]
+                if next_session_id != self.session_id:
+                    self.session_id = next_session_id
+                    self.last_presence = 0.0
                 self.capture_enabled.set()
                 print(f"[SESSION] edge={self.device_id} state=streaming session={self.session_id}")
-            elif payload.get("state") in {"monitoring", "stopping", "error"}:
+            elif payload.get("state") in {"monitoring", "stopping", "stopped", "error"}:
                 self.session_id = None
                 self.capture_enabled.clear()
                 print(f"[SESSION] edge={self.device_id} state={payload.get('state')}; capture disabled")

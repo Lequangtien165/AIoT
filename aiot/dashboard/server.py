@@ -66,6 +66,7 @@ class DashboardConfig:
     snapshot_dir: str | Path | None = None
     video_url: str = "http://127.0.0.1:8889"
     video_path: str = "camera"
+    video_device_id: str | None = None
 
 
 class ClientHub:
@@ -183,7 +184,7 @@ async def _websocket_loop(
         await websocket.send_json(
             {
                 "type": "hello",
-                "video": {"url": config.video_url, "path": config.video_path},
+                "video": {"url": config.video_url, "path": config.video_path, "device_id": config.video_device_id},
             }
         )
         await websocket.send_json({"type": "status_snapshot", "devices": hub.statuses})

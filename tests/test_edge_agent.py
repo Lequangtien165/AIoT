@@ -11,7 +11,7 @@ from scripts.run_edge_agent import (
     parse_args,
 )
 from aiot.mqtt.client import MqttPublishError
-from aiot.mqtt.topics import control_ack_topic, control_stream_topic
+from aiot.mqtt.topics import TOPIC_MOTION_DETECTED, control_ack_topic, control_stream_topic, stream_activity_topic
 
 
 def make_args(**overrides):
@@ -55,6 +55,39 @@ class PublisherCommandTests(unittest.TestCase):
         command = agent.publisher_command()
         self.assertIn("--motion-triggered", command)
         self.assertEqual(command[command.index("--motion-device") + 1], "1")
+        self.assertEqual(command[command.index("--face-keepalive-timeout") + 1], "120.0")
+
+
+class MotionRelayTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = EdgeAgent(make_args(motion_triggered=True))
+        self.agent.publish = Mock()
+        self.agent.publish_status = Mock()
+
+    def tearDown(self):
+        self.agent.channel.close()
+
+    def test_child_motion_event_is_published(self):
+        self.agent.on_child_event({"type": "motion", "active": True})
+
+        self.assertTrue(self.agent.motion_active)
+        self.assertEqual(self.agent.publish.call_args.args[0], TOPIC_MOTION_DETECTED)
+        self.assertTrue(self.agent.publish.call_args.args[1]["active"])
+
+    def test_session_event_updates_status_with_session_id(self):
+        self.agent.on_child_event({"type": "session", "state": "streaming", "stream_session_id": "session-1"})
+
+        self.assertEqual(self.agent.session_id, "session-1")
+        self.agent.publish_status.assert_called_once()
+
+    def test_face_presence_is_forwarded_to_child(self):
+        self.agent.channel.send = Mock(return_value=True)
+        self.agent.on_message(
+            stream_activity_topic("pi4-edge-01"),
+            {"schema_version": 1, "device_id": "pi4-edge-01", "action": "face_presence", "stream_session_id": "session-1", "face_count": 1},
+        )
+
+        self.assertEqual(self.agent.channel.send.call_args.args[0]["type"], "face_presence")
 
     def test_rpi_csi_command_forwards_profile_and_omits_device(self):
         agent = EdgeAgent(make_args(profile="rpi-csi", device=None))

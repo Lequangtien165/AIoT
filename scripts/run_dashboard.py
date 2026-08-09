@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="MediaMTX WebRTC base URL for WHEP (default: http://127.0.0.1:8889).",
     )
     parser.add_argument("--video-path", default="camera", help="MediaMTX path to play (default: camera).")
+    parser.add_argument("--video-device-id", help="Edge device ID that owns --video-path; drives WHEP lifecycle from its status.")
     parser.add_argument("--mqtt-host", default="127.0.0.1", help="MQTT broker host (default: 127.0.0.1).")
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
     parser.add_argument("--mqtt-client-id", default="aiot-dashboard", help="MQTT client ID (default: aiot-dashboard).")
@@ -86,6 +87,7 @@ def main() -> int:
         snapshot_dir=args.snapshot_dir,
         video_url=args.video_url,
         video_path=args.video_path,
+        video_device_id=args.video_device_id,
     )
     app = create_app(config)
     print(f"[DASHBOARD] serving http://{args.host}:{args.port} (video: {config.video_url}/{config.video_path})")

@@ -33,6 +33,7 @@ from aiot.mqtt.topics import (
     stream_activity_topic,
 )
 from aiot.streaming.edge_session import EdgeSessionController, EdgeSessionState
+from aiot.streaming.agent_channel import PublisherChannel
 from aiot.streaming.motion_detector import MotionDetector
 from aiot.streaming.profiles import (
     PROFILE_CHOICES,
@@ -509,6 +510,19 @@ def handle_session_activity(session, device_id: str, topic: str, message: dict, 
         )
 
 
+def handle_agent_message(session: EdgeSessionController | None, device_id: str, message: dict) -> None:
+    """Apply lease messages relayed by an agent-owned MQTT connection."""
+    if session is None or message.get("type") != "face_presence":
+        return
+    if message.get("device_id") != device_id:
+        return
+    if session.face_presence(message.get("stream_session_id", ""), message.get("face_count")):
+        print(
+            f"[IPC] face_presence accepted session={message['stream_session_id']} "
+            f"faces={message['face_count']} lease={session.keepalive_timeout:.0f}s"
+        )
+
+
 def run_motion_session(
     args,
     config,
@@ -517,9 +531,13 @@ def run_motion_session(
     session,
     session_id: str,
     stop_requested: threading.Event,
+    channel: PublisherChannel | None = None,
 ) -> None:
     """Publish one motion-triggered RTSP session until lease expiry or stop."""
     publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=True))
+    if channel is not None:
+        channel.emit({"type": "motion", "active": True})
+        channel.emit({"type": "session", "state": "starting", "stream_session_id": session_id})
     publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="starting", stream_session_id=session_id))
     ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
     print(f"[RTSP] publisher starting pid={ffmpeg.pid} session={session_id}")
@@ -530,6 +548,8 @@ def run_motion_session(
         session.complete_stop()
         return
     session.publisher_ready()
+    if channel is not None:
+        channel.emit({"type": "session", "state": "streaming", "stream_session_id": session_id})
     print(
         f"[SESSION] state=streaming device={args.mqtt_client_id} session={session_id} "
         f"discovery_timeout={session.discovery_timeout:.0f}s"
@@ -548,9 +568,12 @@ def run_motion_session(
     publish_mqtt(mqtt_client, TOPIC_MOTION_DETECTED, payloads.motion_detected(device_id=args.mqtt_client_id, sensor_id="software-motion", active=False))
     publish_mqtt(mqtt_client, system_status_topic(args.mqtt_client_id), payloads.system_status(device_id=args.mqtt_client_id, component="rtsp-publisher", state="monitoring"))
     print(f"[SESSION] state=monitoring device={args.mqtt_client_id}")
+    if channel is not None:
+        channel.emit({"type": "motion", "active": False})
+        channel.emit({"type": "session", "state": "monitoring", "stream_session_id": None})
 
 
-def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session) -> int:
+def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session, channel=None) -> int:
     detector_device = args.motion_device or args.device
     if config.name in {"windows", "macos-arm64"} and not str(detector_device).isdigit():
         print("--motion-device must be an OpenCV camera index on Windows/macOS.", file=sys.stderr)
@@ -574,7 +597,7 @@ def run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, se
             return 1
         session_id = session.begin()
         print(f"[MOTION] triggered; starting session={session_id}")
-        run_motion_session(args, config, mediamtx, mqtt_client, session, session_id, stop_requested)
+        run_motion_session(args, config, mediamtx, mqtt_client, session, session_id, stop_requested, channel)
         if stop_requested.is_set():
             stop_requested.clear()
     return 0
@@ -674,6 +697,13 @@ def main() -> int:
     stop_requested = threading.Event()
     session = EdgeSessionController(args.face_discovery_timeout, args.face_keepalive_timeout) if args.motion_triggered else None
     try:
+        channel = PublisherChannel.from_environment(
+            lambda message: handle_agent_message(session, args.mqtt_client_id, message)
+        )
+    except OSError as error:
+        print(f"[IPC] could not connect to edge agent: {error}", file=sys.stderr)
+        return 1
+    try:
         mqtt_client = None if args.no_mqtt else connect_mqtt(args, stop_requested, session)
     except (MqttUnavailable, MqttConnectionError, MqttSubscriptionError) as error:
         print(f"[MQTT] {error}", file=sys.stderr)
@@ -699,7 +729,7 @@ def main() -> int:
             return 1
 
         if args.motion_triggered:
-            return run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session)
+            return run_motion_triggered(args, config, mediamtx, stop_requested, mqtt_client, session, channel)
         if profile_uses_ffmpeg(profile):
             ffmpeg = subprocess.Popen(build_ffmpeg_command(args, config))
         print(f"Publishing webcam at {RTSP_URL} (profile: {profile})")
@@ -725,6 +755,8 @@ def main() -> int:
         print("Stopping RTSP server.")
         return 0
     finally:
+        if channel is not None:
+            channel.close()
         publish_mqtt(
             mqtt_client,
             system_status_topic(args.mqtt_client_id),
