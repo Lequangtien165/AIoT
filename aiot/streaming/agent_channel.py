@@ -123,6 +123,9 @@ class PublisherChannel:
             return None
         channel = cls(on_message)
         connection = socket.create_connection((host, int(port)), timeout=5)
+        # The connect timeout must not become a read deadline for an idle lease
+        # channel: face_presence may legitimately arrive minutes later.
+        connection.settimeout(None)
         channel._socket = connection
         channel.emit({"type": "hello", "token": token})
         threading.Thread(target=channel._read_loop, daemon=True, name="publisher-channel").start()
@@ -161,5 +164,8 @@ class PublisherChannel:
                     continue
                 if isinstance(message, dict):
                     self._on_message(message)
+        except OSError:
+            # The parent terminates this child during stop/restart.
+            pass
         finally:
             self.close()

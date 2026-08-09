@@ -9,15 +9,15 @@ complete flag reference of every command, see `docs/CLI_REFERENCE.md`.
 
 ## Role Matrix
 
-| Role | Runs on | Software |
-|---|---|---|
-| Edge publisher | Windows AMD64, macOS Apple Silicon, Linux ARM64, Raspberry Pi | `stream_server.py` + pinned tools |
-| Edge agent (MQTT) | any edge host with a broker | `scripts/run_edge_agent.py` |
-| Broker | Docker host (localhost only, or LAN with TLS) | Mosquitto 2.0 |
-| Controller | any host with the repo | `mosquitto_sub` or a small paho script |
-| Audit logger | broker host or cloud | `scripts/run_mqtt_logger.py` |
-| Cloud consumer | Windows AMD64 with GPU | `app.py`, `recognize_stream.py` |
-| Dashboard (guard console) | broker host or cloud | `scripts/run_dashboard.py` (FastAPI) + browser |
+| Role                      | Runs on                                                       | Software                                       |
+| ------------------------- | ------------------------------------------------------------- | ---------------------------------------------- |
+| Edge publisher            | Windows AMD64, macOS Apple Silicon, Linux ARM64, Raspberry Pi | `stream_server.py` + pinned tools              |
+| Edge agent (MQTT)         | any edge host with a broker                                   | `scripts/run_edge_agent.py`                    |
+| Broker                    | Docker host (localhost only, or LAN with TLS)                 | Mosquitto 2.0                                  |
+| Controller                | any host with the repo                                        | `mosquitto_sub` or a small paho script         |
+| Audit logger              | broker host or cloud                                          | `scripts/run_mqtt_logger.py`                   |
+| Cloud consumer            | Windows AMD64 with GPU                                        | `app.py`, `recognize_stream.py`                |
+| Dashboard (guard console) | broker host or cloud                                          | `scripts/run_dashboard.py` (FastAPI) + browser |
 
 Profiles: `dshow` (Windows), `avfoundation` (macOS), `v4l2` (Linux, USB), and
 `rpi-csi` (Raspberry Pi CSI, direct MediaMTX publishing without FFmpeg). The
@@ -38,7 +38,7 @@ python -m pip install paho-mqtt        # MQTT control plane
 - Raspberry Pi: 64-bit Bookworm, `sudo apt install -y ffmpeg v4l-utils rpicam-apps`,
   `sudo usermod -aG video "$USER"`, enable the camera in `raspi-config`.
 - Windows cloud recognition additionally: `requirements-recognition-windows.txt`
-  + `pip install --no-deps insightface==1.0.1`.
+  - `pip install --no-deps insightface==1.0.1`.
 
 ## 2. Broker (Role: Broker Host)
 
@@ -159,6 +159,7 @@ python scripts/run_edge_agent.py \
   --face-discovery-timeout 30 \
   --face-keepalive-timeout 120 \
   --heartbeat-interval 5
+  --motion-device 0
 ```
 
 `--motion-device` defaults to `--device`; on Windows/macOS it must be an OpenCV
@@ -395,8 +396,9 @@ journalctl -u aiot-rpi-csi -f
 
 The unit runs as `pi:video`; the project must live at `/opt/aiot` (edit the unit
 otherwise). Do not run the systemd unit and `run_edge_agent.py` at the same time
+
 - each supervises its own publisher. Recovery check: reboot, then ffprobe
-`rtsp://<PI_IP>:8554/camera`; the stream must return without manual action.
+  `rtsp://<PI_IP>:8554/camera`; the stream must return without manual action.
 
 ## 10. Demo Sequence (verified 2026-08-08)
 
@@ -417,15 +419,15 @@ otherwise). Do not run the systemd unit and `run_edge_agent.py` at the same time
 
 ## 11. Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Preflight: "FFmpeg was not found" | tools missing on this profile | `python scripts/setup_tools.py` (or brew/apt, see section 1) |
-| Preflight: "camera enumeration failed" / "no cameras" (Pi) | CSI cable or raspi-config camera off | `sudo raspi-config` > Interface Options > Camera |
-| Preflight: "RTSP port already in use" | another publisher/player holds 8554 | stop it, or check `tasklist`/`pgrep` for mediamtx |
-| Controller sees no acks | ACL mismatch or wrong device_id | check `config/mosquitto/aclfile` (LF line endings), same `--mqtt-client-id` |
-| `recognize_stream.py` not recognized on GPU | missing `--require-gpu` flag | see README "Windows Recognition Setup" |
-| Agent publish rejected "No matching subscribers" | controller not subscribed to `control/ack/+` | subscribe first, then send commands |
-| Mosquitto ACL silently matching nothing | CRLF line endings in `config/mosquitto/*` | keep LF (`.gitattributes` enforces) |
-| Dashboard video stuck on "Video unavailable" | MediaMTX WebRTC not reachable | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcAdditionalHosts: [<LAN_IP>]` in the MediaMTX config |
-| Dashboard control returns "MQTT broker is not connected" | broker down or bad dashboard credentials | check `docker compose ps`; verify `aiot-dashboard` exists in `passwords.example`/ACL and the password env var is set |
-| Timeline shows no recognition events | recognition pipeline not publishing | run `recognize_stream.py` with `--mqtt-host`; check `mosquitto_sub -u aiot-logger ... -t recognition/result -v` |
+| Symptom                                                    | Likely cause                                 | Fix                                                                                                                                                                                                             |
+| ---------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Preflight: "FFmpeg was not found"                          | tools missing on this profile                | `python scripts/setup_tools.py` (or brew/apt, see section 1)                                                                                                                                                    |
+| Preflight: "camera enumeration failed" / "no cameras" (Pi) | CSI cable or raspi-config camera off         | `sudo raspi-config` > Interface Options > Camera                                                                                                                                                                |
+| Preflight: "RTSP port already in use"                      | another publisher/player holds 8554          | stop it, or check `tasklist`/`pgrep` for mediamtx                                                                                                                                                               |
+| Controller sees no acks                                    | ACL mismatch or wrong device_id              | check `config/mosquitto/aclfile` (LF line endings), same `--mqtt-client-id`                                                                                                                                     |
+| `recognize_stream.py` not recognized on GPU                | missing `--require-gpu` flag                 | see README "Windows Recognition Setup"                                                                                                                                                                          |
+| Agent publish rejected "No matching subscribers"           | controller not subscribed to `control/ack/+` | subscribe first, then send commands                                                                                                                                                                             |
+| Mosquitto ACL silently matching nothing                    | CRLF line endings in `config/mosquitto/*`    | keep LF (`.gitattributes` enforces)                                                                                                                                                                             |
+| Dashboard video stuck on "Video unavailable"               | MediaMTX WebRTC not reachable                | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcAdditionalHosts: [<LAN_IP>]` in the MediaMTX config |
+| Dashboard control returns "MQTT broker is not connected"   | broker down or bad dashboard credentials     | check `docker compose ps`; verify `aiot-dashboard` exists in `passwords.example`/ACL and the password env var is set                                                                                            |
+| Timeline shows no recognition events                       | recognition pipeline not publishing          | run `recognize_stream.py` with `--mqtt-host`; check `mosquitto_sub -u aiot-logger ... -t recognition/result -v`                                                                                                 |
