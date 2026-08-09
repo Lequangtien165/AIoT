@@ -158,7 +158,7 @@ python scripts/run_edge_agent.py \
   --mqtt-password-env AIOT_EDGE_PASSWORD \
   --face-discovery-timeout 30 \
   --face-keepalive-timeout 120 \
-  --heartbeat-interval 5
+  --heartbeat-interval 5 \
   --motion-device 0
 ```
 
