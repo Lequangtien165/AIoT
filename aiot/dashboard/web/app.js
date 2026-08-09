@@ -62,7 +62,7 @@ function isWanted(label) {
 
 function wantedName(label) {
   const entry = wantedEntryCache.get(label);
-  return (entry && entry.name) || label;
+  return entry?.name || label;
 }
 
 async function fetchWantedLabel(label) {
