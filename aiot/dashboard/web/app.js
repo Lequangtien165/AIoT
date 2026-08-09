@@ -33,8 +33,8 @@ const state = {
   pc: null,
 };
 
-const wantedCache = new Map();
-const wantedInflight = new Set();
+let wantedEntries = [];
+const wantedEntryCache = new Map();
 
 const ALARM_TTL_MS = 8000;
 const ALARM_COOLDOWN_MS = 30000;
@@ -52,60 +52,101 @@ function formatTime(tsMs, receivedAt) {
   return "";
 }
 
-function isWanted(label) {
-  if (!label) return false;
-  if (!wantedCache.has(label)) {
-    refreshWanted(label);
-    return false;
+let wantedListPromise = null;
+
+function loadWanted() {
+  if (!wantedListPromise) {
+    wantedListPromise = fetchWantedList();
   }
-  return wantedCache.get(label) !== null;
+  return wantedListPromise;
+}
+
+async function fetchWantedList() {
+  try {
+    const response = await fetch("/api/wanted");
+    if (!response.ok) throw new Error(`wanted ${response.status}`);
+    const body = await response.json();
+    wantedEntries = (body.entries || [])
+      .map((entry) => ({ re: safeRegex(entry.match), ...entry }))
+      .filter((entry) => entry.re !== null);
+  } catch {
+    wantedEntries = [];
+  }
+}
+
+function safeRegex(pattern) {
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
+
+function matchWanted(label) {
+  if (!label) return null;
+  for (const { re, name, severity } of wantedEntries) {
+    if (re.test(label)) {
+      wantedEntryCache.set(label, { name, severity });
+      return { name, severity };
+    }
+  }
+  return null;
+}
+
+function isWanted(label) {
+  const entry = matchWanted(label);
+  return entry !== null || wantedEntryCache.get(label) !== null;
 }
 
 function wantedName(label) {
-  if (!label) return label;
-  if (!wantedCache.has(label)) {
-    refreshWanted(label);
-    return label;
-  }
-  const entry = wantedCache.get(label);
+  const entry = matchWanted(label) || wantedEntryCache.get(label);
   return entry?.name || label;
 }
 
 async function refreshWanted(label) {
-  if (wantedInflight.has(label) || wantedCache.has(label)) return;
-  wantedInflight.add(label);
+  await loadWanted();
+  if (wantedEntryCache.has(label)) return;
+  const entry = matchWanted(label);
+  if (entry) {
+    wantedEntryCache.set(label, entry);
+    return;
+  }
   try {
     const response = await fetch(`/api/wanted/match?label=${encodeURIComponent(label)}`);
     if (!response.ok) return;
     const body = await response.json();
-    wantedCache.set(label, body.wanted ? body.entry : null);
+    wantedEntryCache.set(label, body.wanted ? body.entry : null);
   } catch {
-    wantedCache.set(label, null);
-  } finally {
-    wantedInflight.delete(label);
+    wantedEntryCache.set(label, null);
   }
 }
 
 function setVideoStatus(text) {
-  state.videoStatusText.textContent = text;
-  state.videoStatus.classList.toggle("hidden", false);
+  el.videoStatusText.textContent = text;
+  el.videoStatus.classList.toggle("hidden", false);
 }
 
 /* ---------- Web Audio beep ---------- */
 
 let audioContext = null;
 
-function ensureAudioContext() {
+async function ensureAudioContext() {
   if (!audioContext) {
     const Ctor = window.AudioContext || window.webkitAudioContext;
     if (Ctor) audioContext = new Ctor();
   }
-  if (audioContext?.state === "suspended") audioContext.resume();
+  if (audioContext?.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch {
+      /* keep silent if the browser still blocks autoplay */
+    }
+  }
 }
 
-function beep() {
-  ensureAudioContext();
-  if (!audioContext) return;
+async function beep() {
+  await ensureAudioContext();
+  if (!audioContext || audioContext.state !== "running") return;
   for (let i = 0; i < 3; i++) {
     const oscillator = audioContext.createOscillator();
     const gain = audioContext.createGain();
@@ -403,9 +444,12 @@ function updateTracks(payload) {
   }
 }
 
-function handleRecognitionEvents(payload) {
+async function handleRecognitionEvents(payload) {
   for (const event of payload.events || []) {
-    if ((event.kind === "identity_confirmed" || event.kind === "identity_changed") && event.label && isWanted(event.label)) {
+    if (event.kind !== "identity_confirmed" && event.kind !== "identity_changed") continue;
+    if (!event.label) continue;
+    await refreshWanted(event.label);
+    if (isWanted(event.label)) {
       triggerAlarm(event.label, event.score || 0);
     }
   }
@@ -571,6 +615,7 @@ el.deviceInput.addEventListener("input", () => {
 });
 
 function init() {
+  loadWanted();
   connectWs();
   drawLoop();
 }
