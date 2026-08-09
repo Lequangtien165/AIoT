@@ -50,6 +50,123 @@ Local plaintext broker binds `127.0.0.1:1883` only; LAN clients must use the TLS
 profile on `8883` (see README "MQTT Over LAN With TLS"). Demo credentials are
 generated from `config/mosquitto/passwords.example` by compose.
 
+## 2b. Full Pipeline Over the LAN With TLS
+
+Run the complete pipeline across separate hosts (cloud laptop + edge) over a
+trusted LAN using the TLS broker profile. Plaintext `1883` stays bound to
+`127.0.0.1`; every LAN client connects with `--mqtt-port 8883` and
+`--mqtt-ca-cert`.
+
+### 2b.1 One-time certificates (cloud laptop, broker host)
+
+Generate a self-signed CA + server certificate in Git Bash (MSYS) so the SAN is
+passed through `MSYS_NO_PATHCONV` correctly. Replace `BROKER_HOSTNAME` and
+`BROKER_LAN_IP` with the exact names/IPs the clients use to reach the broker:
+
+```bash
+MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout config/mosquitto/certs/server.key \
+  -out config/mosquitto/certs/server.crt \
+  -days 365 -subj "/CN=BROKER_HOSTNAME" \
+  -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
+cp config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
+```
+
+The SAN must include every address a client uses: `IP:192.168.1.20` if the Pi
+connects to that IP, `DNS:aiot-cloud.local` if it uses the hostname. Then start
+the TLS broker and open inbound TCP `8883` on the Private-network firewall:
+
+```powershell
+docker compose --profile tls up -d mosquitto-tls
+docker compose --profile tls ps   # aiot-mosquitto-tls Up, 0.0.0.0:8883->8883
+```
+
+### 2b.2 Copy the CA to each edge client
+
+Only the CA is public. Copy `config/mosquitto/certs/ca.crt` to the Pi, for
+example:
+
+```bash
+scp <WINDOWS_USER>@<BROKER_LAN_IP>:<REPO>\config\mosquitto\certs\ca.crt ~/aiot-certs/ca.crt
+```
+
+Verify the Pi can open a TLS session before starting the pipeline:
+
+```bash
+mosquitto_sub -h <BROKER_LAN_IP> -p 8883 --cafile ~/aiot-certs/ca.crt \
+  -u aiot-edge -P "$AIOT_EDGE_PASSWORD" -t 'control/stream/pi4-edge-01' -d
+```
+
+A successful TLS handshake plus `SUBACK` means the certificate SAN, firewall,
+broker container (`docker compose --profile tls ps`), and credentials are all
+correct; otherwise check each in that order.
+
+### 2b.3 Edge publisher (Pi) with TLS
+
+```bash
+export AIOT_EDGE_PASSWORD='<edge-password>'
+python stream_server.py \
+  --device /dev/video0 \
+  --mqtt-host <BROKER_LAN_IP> \
+  --mqtt-port 8883 \
+  --mqtt-ca-cert ~/aiot-certs/ca.crt \
+  --mqtt-client-id pi4-edge-01 \
+  --mqtt-username aiot-edge \
+  --mqtt-password-env AIOT_EDGE_PASSWORD
+```
+
+Expected: `[MQTT] connected`, then the retained `system/status/pi4-edge-01`
+reports `state=streaming`. Feed the RTSP relay to the recognizer too:
+
+```
+rtsp://<EDGE_LAN_IP>:8554/camera
+```
+
+### 2b.4 Cloud recognition, logger, dashboard (Windows laptop)
+
+Run each in its own terminal. Every component uses the same
+`--mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ...` and unique
+credentials from the ACL (`aiot-recognition`, `aiot-logger`, `aiot-dashboard`).
+
+```powershell
+# Recognition pipeline (GPU)
+$env:AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py `
+  --source "rtsp://<EDGE_LAN_IP>:8554/camera" `
+  --require-gpu `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+```powershell
+# Audit logger
+$env:AIOT_MQTT_PASSWORD='<logger-password>'
+python scripts\run_mqtt_logger.py `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+```powershell
+# Dashboard, reachable on the LAN at http://<LAPTOP_LAN_IP>:8080
+$env:AIOT_MQTT_PASSWORD='<dashboard-password>'
+python scripts\run_dashboard.py `
+  --host 0.0.0.0 --port 8080 `
+  --video-url http://<MEDIAMTX_HOST>:8889 `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-dashboard `
+  --mqtt-username aiot-dashboard --mqtt-password-env AIOT_MQTT_PASSWORD `
+  --snapshot-dir .\snapshots
+```
+
+`--host 0.0.0.0` exposes the guarded console on the LAN; pair that with the TLS
+broker profile and only bind it on a trusted network. Pass `--video-url` the
+MediaMTX WHEP endpoint that hosts the live stream (`http://<PI_IP>:8889` at the
+edge, or `<INTERNAL_MTX_HOST>:8889` if MediaMTX runs on the cloud).
+
 ## 3. Edge Publisher (Role: Edge Publisher)
 
 List cameras, then publish. `--profile` is optional except for `rpi-csi`.
