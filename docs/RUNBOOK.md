@@ -4,7 +4,8 @@ Single source of truth for deploying and operating the project across every role
 edge publishers (Windows/macOS/Linux/Pi), the cloud recognition laptop, the MQTT
 broker, the controller, and the audit logger. Commands run from the repository
 root unless stated otherwise. Expected outputs below were verified on
-2026-08-08 with a Windows AMD64 cloud laptop and Docker Mosquitto.
+2026-08-08 with a Windows AMD64 cloud laptop and Docker Mosquitto. For the
+complete flag reference of every command, see `docs/CLI_REFERENCE.md`.
 
 ## Role Matrix
 
@@ -49,6 +50,129 @@ docker compose ps        # expect aiot-mosquitto Up, 127.0.0.1:1883->1883
 Local plaintext broker binds `127.0.0.1:1883` only; LAN clients must use the TLS
 profile on `8883` (see README "MQTT Over LAN With TLS"). Demo credentials are
 generated from `config/mosquitto/passwords.example` by compose.
+
+## 2b. Full Pipeline Over the LAN With TLS
+
+Run the complete pipeline across separate hosts (cloud laptop + edge) over a
+trusted LAN using the TLS broker profile. Plaintext `1883` stays bound to
+`127.0.0.1`; every LAN client connects with `--mqtt-port 8883` and
+`--mqtt-ca-cert`.
+
+### 2b.1 One-time certificates (cloud laptop, broker host)
+
+Generate a self-signed CA + server certificate in Git Bash (MSYS) so the SAN is
+passed through `MSYS_NO_PATHCONV` correctly. Replace `BROKER_HOSTNAME` and
+`BROKER_LAN_IP` with the exact names/IPs the clients use to reach the broker:
+
+```bash
+MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout config/mosquitto/certs/server.key \
+  -out config/mosquitto/certs/server.crt \
+  -days 365 -subj "/CN=BROKER_HOSTNAME" \
+  -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
+cp config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
+```
+
+The SAN must include every address a client uses: `IP:192.168.1.20` if the Pi
+connects to that IP, `DNS:aiot-cloud.local` if it uses the hostname. Then start
+the TLS broker and open inbound TCP `8883` on the Private-network firewall:
+
+```powershell
+docker compose --profile tls up -d mosquitto-tls
+docker compose --profile tls ps   # aiot-mosquitto-tls Up, 0.0.0.0:8883->8883
+```
+
+### 2b.2 Copy the CA to each edge client
+
+Only the CA is public. Copy `config/mosquitto/certs/ca.crt` to the Pi, for
+example:
+
+```bash
+scp <WINDOWS_USER>@<BROKER_LAN_IP>:<REPO>\config\mosquitto\certs\ca.crt ~/aiot-certs/ca.crt
+```
+
+Verify the Pi can open a TLS session before starting the pipeline:
+
+```bash
+mosquitto_sub -h <BROKER_LAN_IP> -p 8883 --cafile ~/aiot-certs/ca.crt \
+  -u aiot-edge -P "$AIOT_EDGE_PASSWORD" -t 'control/stream/pi4-edge-01' -d
+```
+
+A successful TLS handshake plus `SUBACK` means the certificate SAN, firewall,
+broker container (`docker compose --profile tls ps`), and credentials are all
+correct; otherwise check each in that order.
+
+### 2b.3 Edge publisher (Pi) with TLS
+
+```bash
+export AIOT_EDGE_PASSWORD='<edge-password>'
+python stream_server.py \
+  --device /dev/video0 \
+  --mqtt-host <BROKER_LAN_IP> \
+  --mqtt-port 8883 \
+  --mqtt-ca-cert ~/aiot-certs/ca.crt \
+  --mqtt-client-id pi4-edge-01 \
+  --mqtt-username aiot-edge \
+  --mqtt-password-env AIOT_EDGE_PASSWORD
+```
+
+Expected: `[MQTT] connected`, then the retained `system/status/pi4-edge-01`
+reports `state=streaming`. Feed the RTSP relay to the recognizer too:
+
+```
+rtsp://<EDGE_LAN_IP>:8554/camera
+```
+
+### 2b.4 Cloud recognition, logger, dashboard (Windows laptop)
+
+Run each in its own terminal. Every component uses the same
+`--mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ...` and unique
+credentials from the ACL (`aiot-recognition`, `aiot-logger`, `aiot-dashboard`).
+
+```powershell
+# Recognition pipeline (GPU)
+$env:AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py `
+  --source "rtsp://<EDGE_LAN_IP>:8554/camera" `
+  --require-gpu `
+  --no-mirror `
+  --snapshot-dir .\snapshots `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+`--no-mirror` keeps the published bounding boxes in the same (unmirrored) space
+as the dashboard video; `--snapshot-dir .\snapshots` must match the dashboard's
+`--snapshot-dir` so event-drawer snapshots resolve.
+
+```powershell
+# Audit logger
+$env:AIOT_MQTT_PASSWORD='<logger-password>'
+python scripts\run_mqtt_logger.py `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-username aiot-logger --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+```powershell
+# Dashboard, reachable on the LAN at http://<LAPTOP_LAN_IP>:8080
+$env:AIOT_MQTT_PASSWORD='<dashboard-password>'
+python scripts\run_dashboard.py `
+  --host 0.0.0.0 --port 8080 `
+  --video-url http://<MEDIAMTX_HOST>:8889 `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-dashboard `
+  --mqtt-username aiot-dashboard --mqtt-password-env AIOT_MQTT_PASSWORD `
+  --snapshot-dir .\snapshots
+```
+
+`--host 0.0.0.0` exposes the guarded console on the LAN; pair that with the TLS
+broker profile and only bind it on a trusted network. Pass `--video-url` the
+MediaMTX WHEP endpoint that hosts the live stream (`http://<PI_IP>:8889` at the
+edge, or `<INTERNAL_MTX_HOST>:8889` if MediaMTX runs on the cloud).
 
 ## 3. Edge Publisher (Role: Edge Publisher)
 
@@ -152,7 +276,7 @@ A browser console combining live WebRTC video with a recognition box overlay,
 a realtime + historical event timeline, wanted-person alarms, and edge control
 buttons. Prerequisites: broker (section 2), a publisher (section 3 or 4), the
 audit logger (section 6), and the recognition pipeline publishing
-`recognition/result` (section 7 below). MediaMTX must run with a WebRTC-enabled
+`recognition/result` (section 8 below). MediaMTX must run with a WebRTC-enabled
 config (both `config/mediamtx.yml` and `config/mediamtx-rpi.yml` enable
 `webrtc: true` on `:8889`, UDP mux `8189`).
 
@@ -187,8 +311,20 @@ produce command entries with `result=succeeded` and the resulting state.
 ```powershell
 python app.py --source "rtsp://<EDGE_IP>:8554/camera"          # MediaPipe preview
 python build_index.py                                          # rebuild after dataset changes
-python recognize_stream.py --source "rtsp://<EDGE_IP>:8554/camera" --require-gpu
+$env:AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py `
+  --source "rtsp://<EDGE_IP>:8554/camera" `
+  --require-gpu `
+  --no-mirror `
+  --snapshot-dir .\snapshots `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
+
+`--no-mirror` publishes boxes in the same unmirrored space as the dashboard
+video; drop it only if the dashboard mirrors the video instead (CSS flip).
 
 `recognize_stream.py` publishes `recognition/result` (schema: `frame_id`,
 `result_id`, `tracks`, `events`, `source` redacted) that the audit logger
@@ -236,9 +372,9 @@ otherwise). Do not run the systemd unit and `run_edge_agent.py` at the same time
 | Preflight: "camera enumeration failed" / "no cameras" (Pi) | CSI cable or raspi-config camera off | `sudo raspi-config` > Interface Options > Camera |
 | Preflight: "RTSP port already in use" | another publisher/player holds 8554 | stop it, or check `tasklist`/`pgrep` for mediamtx |
 | Controller sees no acks | ACL mismatch or wrong device_id | check `config/mosquitto/aclfile` (LF line endings), same `--mqtt-client-id` |
-| `recognize_stream.py` not recognized on GPU | missing `--require-gpu` env | see README "Windows Recognition Setup" |
+| `recognize_stream.py` not recognized on GPU | missing `--require-gpu` flag | see README "Windows Recognition Setup" |
 | Agent publish rejected "No matching subscribers" | controller not subscribed to `control/ack/+` | subscribe first, then send commands |
 | Mosquitto ACL silently matching nothing | CRLF line endings in `config/mosquitto/*` | keep LF (`.gitattributes` enforces) |
-| Dashboard video stuck on "Video unavailable" | MediaMTX WebRTC not reachable | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcLocalIP: <LAN_IP>` in the MediaMTX config |
+| Dashboard video stuck on "Video unavailable" | MediaMTX WebRTC not reachable | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcAdditionalHosts: [<LAN_IP>]` in the MediaMTX config |
 | Dashboard control returns "MQTT broker is not connected" | broker down or bad dashboard credentials | check `docker compose ps`; verify `aiot-dashboard` exists in `passwords.example`/ACL and the password env var is set |
 | Timeline shows no recognition events | recognition pipeline not publishing | run `recognize_stream.py` with `--mqtt-host`; check `mosquitto_sub -u aiot-logger ... -t recognition/result -v` |

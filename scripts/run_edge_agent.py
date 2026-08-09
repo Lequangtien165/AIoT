@@ -54,7 +54,7 @@ class InvalidCommand:
     error: str
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Persistently supervise the edge RTSP publisher.")
     parser.add_argument("--device", help="Camera input; required for FFmpeg-based profiles, ignored by rpi-csi.")
     parser.add_argument(
@@ -66,18 +66,23 @@ def parse_args() -> argparse.Namespace:
             "rpi-csi is never auto-detected and requires no --device."
         ),
     )
-    parser.add_argument("--motion-triggered", action="store_true")
-    parser.add_argument("--motion-device")
-    parser.add_argument("--framerate", type=int, default=30)
-    parser.add_argument("--video-size", default="1280x720")
-    parser.add_argument("--bitrate", default="2M")
-    parser.add_argument("--mqtt-host", required=True)
-    parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--mqtt-client-id", required=True)
-    parser.add_argument("--mqtt-username")
-    parser.add_argument("--mqtt-password-env")
-    parser.add_argument("--mqtt-ca-cert")
-    parser.add_argument("--heartbeat-interval", type=float, default=5.0)
+    parser.add_argument("--motion-triggered", action="store_true", help="Start RTSP sessions only after significant motion.")
+    parser.add_argument("--motion-device", help="OpenCV camera index/path used while monitoring; defaults to --device.")
+    parser.add_argument("--framerate", type=int, default=30, help="Requested camera frame rate (default: 30).")
+    parser.add_argument("--video-size", default="1280x720", help="Requested size (default: 1280x720).")
+    parser.add_argument("--bitrate", default="2M", help="H.264 bitrate (default: 2M).")
+    parser.add_argument("--mqtt-host", required=True, help="MQTT broker host (required).")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
+    parser.add_argument("--mqtt-client-id", required=True, help="MQTT client/edge device ID (required).")
+    parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
+    parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
+    parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
+    parser.add_argument("--heartbeat-interval", type=float, default=5.0, help="Status heartbeat interval in seconds (default: 5.0).")
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
     args = parser.parse_args()
     if args.mqtt_username:
         try:

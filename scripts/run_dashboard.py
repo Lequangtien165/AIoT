@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from aiot.mqtt.client import password_from_env
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the AIoT admin dashboard.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8080, help="Dashboard HTTP port (default: 8080).")
@@ -22,9 +22,9 @@ def parse_args() -> argparse.Namespace:
         help="MediaMTX WebRTC base URL for WHEP (default: http://127.0.0.1:8889).",
     )
     parser.add_argument("--video-path", default="camera", help="MediaMTX path to play (default: camera).")
-    parser.add_argument("--mqtt-host", default="127.0.0.1")
-    parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--mqtt-client-id", default="aiot-dashboard")
+    parser.add_argument("--mqtt-host", default="127.0.0.1", help="MQTT broker host (default: 127.0.0.1).")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
+    parser.add_argument("--mqtt-client-id", default="aiot-dashboard", help="MQTT client ID (default: aiot-dashboard).")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
@@ -41,7 +41,11 @@ def parse_args() -> argparse.Namespace:
         "--snapshot-dir",
         help="Recognition snapshot directory served at /snapshots/* (optional).",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    args = build_parser().parse_args()
     if not 0 < args.port < 65536:
         parser.error("--port must be between 1 and 65535.")
     if args.mqtt_username:

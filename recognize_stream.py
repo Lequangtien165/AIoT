@@ -106,33 +106,43 @@ class CloudEdgeSession:
             return self.session_id
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Recognize faces from an RTSP stream on Windows.")
     parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL (default: {RTSP_URL}).")
     parser.add_argument("--threshold", type=float, default=0.45, help="Cosine similarity threshold (default: 0.45).")
     parser.add_argument("--top-k", type=int, default=5, help="Number of FAISS vectors to retrieve (default: 5).")
-    parser.add_argument("--recognition-fps", type=float, default=6.0)
+    parser.add_argument("--recognition-fps", type=float, default=6.0, help="SCRFD detection/tracking cycles per second (default: 6.0).")
     parser.add_argument(
         "--max-embeddings-per-cycle",
         type=int,
         default=1,
         help="Maximum ArcFace embeddings per SCRFD detection cycle (default: 1).",
     )
-    parser.add_argument("--track-iou-threshold", type=float, default=0.30)
-    parser.add_argument("--track-ttl-frames", type=int, default=8)
-    parser.add_argument("--min-track-age-frames", type=int, default=3)
-    parser.add_argument("--min-face-size", type=int, default=80)
-    parser.add_argument("--matched-recognition-interval-frames", type=int, default=30)
+    parser.add_argument("--track-iou-threshold", type=float, default=0.30, help="IoU threshold to associate a track with a detection (default: 0.30).")
+    parser.add_argument("--track-ttl-frames", type=int, default=8, help="Missed frames before a track expires (default: 8).")
+    parser.add_argument("--min-track-age-frames", type=int, default=3, help="Visible frames before a track can be recognized (default: 3).")
+    parser.add_argument("--min-face-size", type=int, default=80, help="Minimum face box side in pixels for recognition (default: 80).")
+    parser.add_argument("--matched-recognition-interval-frames", type=int, default=30, help="Frames between re-embeddings of a matched track (default: 30).")
+    parser.add_argument(
+        "--embedding-change-threshold",
+        type=float,
+        default=0.6,
+        help="Cosine similarity below which a matched track's face is treated as changed (default: 0.6).",
+    )
     parser.add_argument("--det-size", type=int, default=640, help="InsightFace detector size (default: 640).")
     parser.add_argument("--record-video", help="File or directory for annotated video output.")
     parser.add_argument("--snapshot-dir", help="Directory for snapshots on MATCH or identity change.")
-    parser.add_argument("--no-mirror", action="store_true", help="Do not mirror the preview.")
-    parser.add_argument("--profile", action="store_true", help="Print capture, display, and recognition profiling.")
+    parser.add_argument("--no-mirror", action="store_true", help="Do not mirror the preview; keep published boxes in the raw video space.")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print capture, display, and recognition profiling. Not the camera profile flag used by stream_server.py.",
+    )
     parser.add_argument("--require-gpu", action="store_true", help="Exit if CUDAExecutionProvider is not active.")
-    parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument("--reconnect-delay", type=float, default=2.0, help="Seconds between RTSP reconnect attempts (default: 2.0).")
     parser.add_argument("--mqtt-host", help="MQTT broker host for recognition/result events.")
-    parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--mqtt-client-id", default="aiot-recognition")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
+    parser.add_argument("--mqtt-client-id", default="aiot-recognition", help="MQTT client ID (default: aiot-recognition).")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
@@ -140,17 +150,28 @@ def parse_args() -> argparse.Namespace:
         "--source-device-id",
         help="Edge device ID for device-scoped pipeline MQTT errors; defaults to --mqtt-client-id.",
     )
-    parser.add_argument("--edge-triggered-session", action="store_true")
-    parser.add_argument("--face-presence-interval", type=float, default=15.0)
+    parser.add_argument(
+        "--edge-triggered-session",
+        action="store_true",
+        help="Enable edge-triggered sessions: subscribe to the edge status and publish face presence.",
+    )
+    parser.add_argument("--face-presence-interval", type=float, default=15.0, help="Seconds between face-presence lease renewals (default: 15.0).")
     parser.add_argument(
         "--wanted-config",
         help="Path to the wanted-person JSON config (default: config/wanted.json).",
     )
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
     args = parser.parse_args()
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between 0 and 1.")
     if args.top_k <= 0 or args.recognition_fps <= 0 or args.det_size <= 0 or args.max_embeddings_per_cycle <= 0:
         parser.error("top-k, recognition-fps, det-size, and max-embeddings-per-cycle must be greater than 0.")
+    if not 0 <= args.embedding_change_threshold <= 1:
+        parser.error("embedding-change-threshold must be between 0 and 1.")
     if (
         args.reconnect_delay <= 0
         or args.track_ttl_frames <= 0
@@ -419,6 +440,7 @@ class RecognitionWorker:
         max_embeddings_per_cycle: int,
         top_k: int,
         threshold: float,
+        embedding_change_threshold: float = 0.6,
         on_pipeline_error=None,
     ) -> None:
         self.reader = reader
@@ -429,6 +451,7 @@ class RecognitionWorker:
         self.max_embeddings_per_cycle = max_embeddings_per_cycle
         self.top_k = top_k
         self.threshold = threshold
+        self.embedding_change_threshold = embedding_change_threshold
         self.on_pipeline_error = on_pipeline_error
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -551,6 +574,7 @@ class RecognitionWorker:
         embedding = self.engine.embed_detected_face(frame, detection)
         if embedding is None:
             return None, False
+        self.tracker.record_embedding(track.track_id, embedding.embedding, self.embedding_change_threshold)
         name, score = self.recognizer.search(embedding.embedding, self.top_k)[0]
         return self.tracker.apply_recognition(track.track_id, name, score, self.threshold), True
 
@@ -905,6 +929,7 @@ def main() -> int:
         max_embeddings_per_cycle=args.max_embeddings_per_cycle,
         top_k=args.top_k,
         threshold=args.threshold,
+        embedding_change_threshold=args.embedding_change_threshold,
         on_pipeline_error=on_pipeline_error,
     )
 

@@ -12,6 +12,7 @@ webrtc: true
 webrtcAddress: :8889
 webrtcEncryption: false
 webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: [100.89.159.16]
 srt: false
 moq: false
 

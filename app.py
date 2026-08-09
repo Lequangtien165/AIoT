@@ -31,11 +31,16 @@ def should_exit(wait_seconds: float) -> bool:
     return False
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Detect faces from an RTSP stream with MediaPipe.")
     parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL to read (default: {RTSP_URL}).")
-    parser.add_argument("--confidence", type=float, default=0.5)
-    parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument("--confidence", type=float, default=0.5, help="Detection confidence from 0 to 1 (default: 0.5).")
+    parser.add_argument("--reconnect-delay", type=float, default=2.0, help="Seconds between RTSP reconnect attempts (default: 2.0).")
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
     args = parser.parse_args()
     if not 0 <= args.confidence <= 1:
         parser.error("--confidence must be between 0 and 1.")

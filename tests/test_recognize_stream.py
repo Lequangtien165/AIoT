@@ -243,6 +243,9 @@ class SplitRecognitionWorkerTests(unittest.TestCase):
                 self.maximum = maximum
                 return [first][:maximum]
 
+            def record_embedding(self, *_args):
+                return None
+
             def apply_recognition(self, *_args):
                 return None
 
