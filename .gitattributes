@@ -2,6 +2,9 @@
 # break ACL pattern matching, so force LF on checkout even on Windows.
 config/mosquitto/* text eol=lf
 
+# The generated CLI reference is LF-only so golden-file comparisons stay clean.
+docs/CLI_REFERENCE.md text eol=lf
+
 # The systemd unit is deployed to a Linux Raspberry Pi; CRLF breaks ExecStart.
 deploy/systemd/* text eol=lf
 config/mediamtx.yml
