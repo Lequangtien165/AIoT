@@ -17,6 +17,7 @@ Looking for more than the quick start? Everything is linked from the
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — current system architecture (profiles, RTSP/MQTT planes, recognition, security).
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — end-to-end operations: deploy each role, the verified demo sequence, troubleshooting.
+- [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — every CLI flag of every command, generated from the argparse definitions.
 - [docs/plans/](docs/plans/) — implementation plan, Pi test plan, implementation review, motion strategy, recognition optimization contract.
 - [docs/legacy/](docs/legacy/) — idea-stage documents from the beginning of the project (converted from `.docx`); they do **not** reflect the current architecture.
 - [AGENTS.md](AGENTS.md) — developer guide and architecture invariants.
@@ -305,6 +306,9 @@ When the publisher is stopped or the stream temporarily fails, the detector keep
 --reconnect-delay S   Seconds between RTSP retries, default: 2
 ```
 
+Every flag of every command is listed in
+[docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+
 ## Realtime Recognition (Windows Only)
 
 After starting the RTSP publisher and building the index, open a second PowerShell terminal on Windows:
@@ -561,7 +565,8 @@ $env:AIOT_MQTT_PASSWORD='dashboard-secret'
 python scripts\run_dashboard.py `
   --mqtt-host 127.0.0.1 `
   --mqtt-username aiot-dashboard `
-  --mqtt-password-env AIOT_MQTT_PASSWORD
+  --mqtt-password-env AIOT_MQTT_PASSWORD `
+  --snapshot-dir outputs/snapshots
 ```
 
 Open `http://127.0.0.1:8080`. The page connects to MediaMTX WebRTC (`http://127.0.0.1:8889/camera/whep` by default) and to the dashboard WebSocket for live events.

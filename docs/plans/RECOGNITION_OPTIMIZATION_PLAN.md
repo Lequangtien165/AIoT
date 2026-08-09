@@ -112,6 +112,9 @@ The first implementation does not have an independent detector cadence. Do not
 interpret `--max-embeddings-per-cycle` as a detector face limit: SCRFD always
 sees all faces.
 
+The full flag list (including defaults and validations) lives in the
+generated [`docs/CLI_REFERENCE.md`](../CLI_REFERENCE.md).
+
 ## Tracker Association Contract
 
 `FaceTracker.update_with_assignments(boxes, frame_id)` returns both tracks and

@@ -4,7 +4,8 @@ Single source of truth for deploying and operating the project across every role
 edge publishers (Windows/macOS/Linux/Pi), the cloud recognition laptop, the MQTT
 broker, the controller, and the audit logger. Commands run from the repository
 root unless stated otherwise. Expected outputs below were verified on
-2026-08-08 with a Windows AMD64 cloud laptop and Docker Mosquitto.
+2026-08-08 with a Windows AMD64 cloud laptop and Docker Mosquitto. For the
+complete flag reference of every command, see `docs/CLI_REFERENCE.md`.
 
 ## Role Matrix
 
@@ -134,11 +135,17 @@ $env:AIOT_MQTT_PASSWORD='<recognition-password>'
 python recognize_stream.py `
   --source "rtsp://<EDGE_LAN_IP>:8554/camera" `
   --require-gpu `
+  --no-mirror `
+  --snapshot-dir .\snapshots `
   --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
   --mqtt-ca-cert config\mosquitto\certs\ca.crt `
   --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
   --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
+
+`--no-mirror` keeps the published bounding boxes in the same (unmirrored) space
+as the dashboard video; `--snapshot-dir .\snapshots` must match the dashboard's
+`--snapshot-dir` so event-drawer snapshots resolve.
 
 ```powershell
 # Audit logger
@@ -269,7 +276,7 @@ A browser console combining live WebRTC video with a recognition box overlay,
 a realtime + historical event timeline, wanted-person alarms, and edge control
 buttons. Prerequisites: broker (section 2), a publisher (section 3 or 4), the
 audit logger (section 6), and the recognition pipeline publishing
-`recognition/result` (section 7 below). MediaMTX must run with a WebRTC-enabled
+`recognition/result` (section 8 below). MediaMTX must run with a WebRTC-enabled
 config (both `config/mediamtx.yml` and `config/mediamtx-rpi.yml` enable
 `webrtc: true` on `:8889`, UDP mux `8189`).
 
@@ -304,8 +311,20 @@ produce command entries with `result=succeeded` and the resulting state.
 ```powershell
 python app.py --source "rtsp://<EDGE_IP>:8554/camera"          # MediaPipe preview
 python build_index.py                                          # rebuild after dataset changes
-python recognize_stream.py --source "rtsp://<EDGE_IP>:8554/camera" --require-gpu
+$env:AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py `
+  --source "rtsp://<EDGE_IP>:8554/camera" `
+  --require-gpu `
+  --no-mirror `
+  --snapshot-dir .\snapshots `
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
+  --mqtt-ca-cert config\mosquitto\certs\ca.crt `
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 `
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
+
+`--no-mirror` publishes boxes in the same unmirrored space as the dashboard
+video; drop it only if the dashboard mirrors the video instead (CSS flip).
 
 `recognize_stream.py` publishes `recognition/result` (schema: `frame_id`,
 `result_id`, `tracks`, `events`, `source` redacted) that the audit logger
@@ -353,9 +372,9 @@ otherwise). Do not run the systemd unit and `run_edge_agent.py` at the same time
 | Preflight: "camera enumeration failed" / "no cameras" (Pi) | CSI cable or raspi-config camera off | `sudo raspi-config` > Interface Options > Camera |
 | Preflight: "RTSP port already in use" | another publisher/player holds 8554 | stop it, or check `tasklist`/`pgrep` for mediamtx |
 | Controller sees no acks | ACL mismatch or wrong device_id | check `config/mosquitto/aclfile` (LF line endings), same `--mqtt-client-id` |
-| `recognize_stream.py` not recognized on GPU | missing `--require-gpu` env | see README "Windows Recognition Setup" |
+| `recognize_stream.py` not recognized on GPU | missing `--require-gpu` flag | see README "Windows Recognition Setup" |
 | Agent publish rejected "No matching subscribers" | controller not subscribed to `control/ack/+` | subscribe first, then send commands |
 | Mosquitto ACL silently matching nothing | CRLF line endings in `config/mosquitto/*` | keep LF (`.gitattributes` enforces) |
-| Dashboard video stuck on "Video unavailable" | MediaMTX WebRTC not reachable | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcLocalIP: <LAN_IP>` in the MediaMTX config |
+| Dashboard video stuck on "Video unavailable" | MediaMTX WebRTC not reachable | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcAdditionalHosts: [<LAN_IP>]` in the MediaMTX config |
 | Dashboard control returns "MQTT broker is not connected" | broker down or bad dashboard credentials | check `docker compose ps`; verify `aiot-dashboard` exists in `passwords.example`/ACL and the password env var is set |
 | Timeline shows no recognition events | recognition pipeline not publishing | run `recognize_stream.py` with `--mqtt-host`; check `mosquitto_sub -u aiot-logger ... -t recognition/result -v` |

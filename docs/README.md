@@ -10,6 +10,7 @@ tracking expect them there.
 | Doc | What it is | Audience |
 |---|---|---|
 | [README.md](../README.md) | Quick start, installation, and CLI usage per module | Everyone |
+| [CLI_REFERENCE.md](CLI_REFERENCE.md) | Every CLI flag of every command, generated from the argparse definitions | Engineer, operator, developer |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | **Current** system architecture (2026-08): profiles, RTSP/MQTT planes, recognition, security | Teacher, developer |
 | [RUNBOOK.md](RUNBOOK.md) | End-to-end operations: deploy, demo sequence, troubleshooting | Engineer, operator, demo |
 | [BACKLOG.md](../BACKLOG.md) | Progress gates (Gate 1 profile deployment, Gate 2 MQTT control), demo evidence, open work | Maintainer, teacher |
@@ -21,20 +22,22 @@ tracking expect them there.
 
 1. `README.md` — what the project does and how to run it.
 2. `docs/ARCHITECTURE.md` — the current design and the decisions behind it.
-3. `docs/RUNBOOK.md` section 9 — the verified demo sequence (what actually ran).
+3. `docs/RUNBOOK.md` section 10 — the verified demo sequence (what actually ran).
 4. `BACKLOG.md` — which gates are closed and which evidence is still pending.
 
 ### Developer (joining the codebase)
 
 1. `AGENTS.md` — commands, module layout, invariants you must not break.
-2. `docs/ARCHITECTURE.md` — component responsibilities and state machines.
-3. `docs/plans/` — design contracts and reviews (see table below).
-4. `BACKLOG.md` — open work and recent progress notes.
+2. `docs/CLI_REFERENCE.md` — every flag of every command, plus cross-process invariants.
+3. `docs/ARCHITECTURE.md` — component responsibilities and state machines.
+4. `docs/plans/` — design contracts and reviews (see table below).
+5. `BACKLOG.md` — open work and recent progress notes.
 
 ### Engineer / Operator (deploying or operating)
 
 1. `docs/RUNBOOK.md` — role-by-role deployment and the troubleshooting table.
-2. `README.md` — platform-specific setup.
+2. `docs/CLI_REFERENCE.md` — full flag reference when tuning a command.
+3. `README.md` — platform-specific setup.
 
 ### Maintainer (yourself, after a break)
 
@@ -85,6 +88,7 @@ docs/
   README.md             THIS HUB
   ARCHITECTURE.md       current architecture
   RUNBOOK.md            end-to-end operations runbook
+  CLI_REFERENCE.md      every CLI flag, generated from the argparse definitions
   plans/                design contracts, test plans, reviews
   legacy/               converted idea-stage documents (not current)
 reports/                removed (content moved to docs/; see git history)
