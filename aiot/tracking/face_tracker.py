@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 
 BBox = tuple[int, int, int, int]
 
@@ -50,6 +52,8 @@ class Track:
     status: str = "pending"
     candidate_label: str | None = None
     candidate_count: int = 0
+    last_embedding: np.ndarray | None = None
+    force_reidentify: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,7 +197,34 @@ class FaceTracker:
         track.label = matched_label
         track.score = score
         track.status = "matched" if matched_label else "unknown"
-        return self._transition_event(track_id, matched_label, previous_label, previous_status, score)
+        event = self._transition_event(track_id, matched_label, previous_label, previous_status, score)
+        if event is not None:
+            track.force_reidentify = False
+        return event
+
+    def record_embedding(self, track_id: int, embedding: np.ndarray, change_threshold: float) -> None:
+        """Store the latest face embedding and flag face-content changes.
+
+        Normalized embeddings make cosine similarity a plain dot product. When a
+        matched track's new embedding differs strongly from the stored one (the
+        face inside a static box changed, e.g. swapping a photo on a phone), the
+        track is forced to re-confirm its identity so a new label can transition
+        without the usual score margin.
+        """
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+        if (
+            track.status == "matched"
+            and not track.force_reidentify
+            and track.last_embedding is not None
+        ):
+            similarity = float(np.dot(embedding, track.last_embedding))
+            if similarity < change_threshold:
+                track.force_reidentify = True
+                track.candidate_label = None
+                track.candidate_count = 0
+        track.last_embedding = embedding
 
     def _record_candidate(self, track: Track, label: str | None) -> None:
         if label != track.candidate_label:
@@ -212,6 +243,8 @@ class FaceTracker:
             return True
         if score is None:
             return False
+        if track.force_reidentify:
+            return True
         return track.score is None or score >= track.score + self.label_switch_margin
 
     @staticmethod
@@ -249,6 +282,8 @@ class FaceTracker:
         return 1.0 + (1.0 - distance)
 
     def _recognition_interval(self, track: Track) -> int:
+        if track.force_reidentify:
+            return self.recognition_interval_frames
         if track.status == "matched":
             return self.matched_recognition_interval_frames
         return self.recognition_interval_frames

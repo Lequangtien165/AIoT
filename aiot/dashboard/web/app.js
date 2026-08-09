@@ -33,8 +33,8 @@ const state = {
   pc: null,
 };
 
-const wantedCache = new Map();
-const wantedInflight = new Set();
+const wantedEntryCache = new Map();
+const wantedInflight = new Map();
 
 const ALARM_TTL_MS = 8000;
 const ALARM_COOLDOWN_MS = 30000;
@@ -52,60 +52,79 @@ function formatTime(tsMs, receivedAt) {
   return "";
 }
 
+/* ---------- wanted detection ---------- */
+
 function isWanted(label) {
   if (!label) return false;
-  if (!wantedCache.has(label)) {
-    refreshWanted(label);
-    return false;
-  }
-  return wantedCache.get(label) !== null;
+  const entry = wantedEntryCache.get(label);
+  return entry != null;
 }
 
 function wantedName(label) {
-  if (!label) return label;
-  if (!wantedCache.has(label)) {
-    refreshWanted(label);
-    return label;
-  }
-  const entry = wantedCache.get(label);
+  const entry = wantedEntryCache.get(label);
   return entry?.name || label;
 }
 
-async function refreshWanted(label) {
-  if (wantedInflight.has(label) || wantedCache.has(label)) return;
-  wantedInflight.add(label);
+async function fetchWantedLabel(label) {
   try {
     const response = await fetch(`/api/wanted/match?label=${encodeURIComponent(label)}`);
     if (!response.ok) return;
     const body = await response.json();
-    wantedCache.set(label, body.wanted ? body.entry : null);
+    wantedEntryCache.set(label, body.wanted ? body.entry : null);
   } catch {
-    wantedCache.set(label, null);
-  } finally {
-    wantedInflight.delete(label);
+    /* transient failure: leave the label uncached so it is retried later */
   }
 }
 
+async function refreshWanted(label) {
+  if (!label) return;
+  if (wantedEntryCache.has(label)) return;
+  if (!wantedInflight.has(label)) {
+    const pending = fetchWantedLabel(label).finally(() => wantedInflight.delete(label));
+    wantedInflight.set(label, pending);
+  }
+  return wantedInflight.get(label);
+}
+
+async function refreshKnownLabels() {
+  const labels = new Set();
+  for (const track of Object.values(state.tracks)) {
+    if (track.label) labels.add(track.label);
+  }
+  for (const entry of state.entries) {
+    for (const event of entry.payload?.events || []) {
+      if (event.label) labels.add(event.label);
+    }
+  }
+  await Promise.all([...labels].map((label) => refreshWanted(label)));
+}
+
 function setVideoStatus(text) {
-  state.videoStatusText.textContent = text;
-  state.videoStatus.classList.toggle("hidden", false);
+  el.videoStatusText.textContent = text;
+  el.videoStatus.classList.toggle("hidden", false);
 }
 
 /* ---------- Web Audio beep ---------- */
 
 let audioContext = null;
 
-function ensureAudioContext() {
+async function ensureAudioContext() {
   if (!audioContext) {
     const Ctor = window.AudioContext || window.webkitAudioContext;
     if (Ctor) audioContext = new Ctor();
   }
-  if (audioContext?.state === "suspended") audioContext.resume();
+  if (audioContext?.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch {
+      /* keep silent if the browser still blocks autoplay */
+    }
+  }
 }
 
-function beep() {
-  ensureAudioContext();
-  if (!audioContext) return;
+async function beep() {
+  await ensureAudioContext();
+  if (audioContext?.state !== "running") return;
   for (let i = 0; i < 3; i++) {
     const oscillator = audioContext.createOscillator();
     const gain = audioContext.createGain();
@@ -223,7 +242,7 @@ function handleMessage(message) {
       for (const row of (message.events || []).reverse()) {
         addEntry(dbEntry(row));
       }
-      renderTimeline();
+      refreshKnownLabels().then(renderTimeline);
       break;
     case "event":
       addEntry(liveEntry(message.topic, message.payload));
@@ -231,7 +250,7 @@ function handleMessage(message) {
         updateTracks(message.payload);
         handleRecognitionEvents(message.payload);
       }
-      renderTimeline();
+      refreshKnownLabels().then(renderTimeline);
       break;
     case "ack":
       addEntry(liveEntry(message.topic, message.payload));
@@ -401,11 +420,15 @@ function updateTracks(payload) {
   for (const key of Object.keys(state.tracks)) {
     if (now - state.tracks[key].ts > TRACK_TTL_MS) delete state.tracks[key];
   }
+  refreshKnownLabels();
 }
 
-function handleRecognitionEvents(payload) {
+async function handleRecognitionEvents(payload) {
   for (const event of payload.events || []) {
-    if ((event.kind === "identity_confirmed" || event.kind === "identity_changed") && event.label && isWanted(event.label)) {
+    if (event.kind !== "identity_confirmed" && event.kind !== "identity_changed") continue;
+    if (!event.label) continue;
+    await refreshWanted(event.label);
+    if (isWanted(event.label)) {
       triggerAlarm(event.label, event.score || 0);
     }
   }
@@ -556,7 +579,7 @@ el.loadMore.addEventListener("click", async () => {
     for (const row of (body.events || []).reverse()) {
       if (!state.entries.some((entry) => entry.id === row.id)) addEntry(dbEntry(row));
     }
-    renderTimeline();
+    refreshKnownLabels().then(renderTimeline);
   } catch (error) {
     showToast(`load failed: ${error.message}`, "err");
   }
@@ -573,6 +596,7 @@ el.deviceInput.addEventListener("input", () => {
 function init() {
   connectWs();
   drawLoop();
+  refreshKnownLabels();
 }
 
 init();

@@ -293,17 +293,22 @@ def _topic_like_pattern(subscription: str) -> str:
     return subscription
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Persist AIoT MQTT audit events to SQLite.")
-    parser.add_argument("--mqtt-host", default="127.0.0.1")
-    parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--client-id", default="aiot-audit-logger")
+    parser.add_argument("--mqtt-host", default="127.0.0.1", help="MQTT broker host (default: 127.0.0.1).")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
+    parser.add_argument("--client-id", default="aiot-audit-logger", help="MQTT client ID (default: aiot-audit-logger).")
     parser.add_argument("--mqtt-username", help="MQTT username. Password is read from --mqtt-password-env.")
     parser.add_argument("--mqtt-password-env", help="Environment variable containing the MQTT password.")
     parser.add_argument("--mqtt-ca-cert", help="CA certificate path for TLS MQTT connections.")
-    parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
-    parser.add_argument("--max-records", type=int, default=DEFAULT_MAX_RECORDS)
-    parser.add_argument("--max-payload-bytes", type=int, default=MAX_PAYLOAD_BYTES)
+    parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS, help="Retention period in days (default: 30).")
+    parser.add_argument("--max-records", type=int, default=DEFAULT_MAX_RECORDS, help="Maximum stored audit records (default: 100000).")
+    parser.add_argument("--max-payload-bytes", type=int, default=MAX_PAYLOAD_BYTES, help="Maximum accepted payload size in bytes (default: 16384).")
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
     args = parser.parse_args()
     if args.retention_days < 0 or args.max_records < 0 or args.max_payload_bytes <= 0:
         parser.error("--retention-days and --max-records must be >= 0; --max-payload-bytes must be > 0.")

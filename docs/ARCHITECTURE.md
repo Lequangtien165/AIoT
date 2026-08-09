@@ -74,8 +74,8 @@ publisher child used only by FFmpeg-based profiles.
   `webrtcAddress: :8889`, `webrtcEncryption: false` on the trusted LAN, UDP mux
   `webrtcLocalUDPAddress: :8189`). Browsers consume the path via WHEP
   (`POST /camera/whep`); this is a separate output and does not change the RTSP
-  TCP transport. Multi-NIC hosts may need `webrtcLocalIP` (see RUNBOOK
-  troubleshooting).
+  TCP transport. Multi-NIC hosts may need `webrtcAdditionalHosts: [<LAN_IP>]`
+  (see RUNBOOK troubleshooting).
 - Health: `aiot/streaming/rtsp_probe.py` sends a DESCRIBE probe; MediaMTX
   answers 200 only while a publisher serves the path (OPTIONS was rejected as a
   false-positive health signal).
@@ -185,7 +185,7 @@ next to the broker and audit logger:
   implemented and unit-tested. Gate 3 (web dashboard: WebRTC video, wanted
   alarms, audit timeline, edge control) is implemented and unit-tested
   (250 tests; 7 skips). The local end-to-end demo sequence is verified
-  (`docs/RUNBOOK.md` section 9).
+  (`docs/RUNBOOK.md` section 10).
 - Pending hardware evidence: Pi `rpi-csi` + systemd boot recovery re-validation,
   `recognize_stream.py` publishing real `recognition/result` in the same
   sequence, and a browser WebRTC session against the LAN publisher.
@@ -195,6 +195,7 @@ next to the broker and audit logger:
 ## 9. Related Documents
 
 - `RUNBOOK.md` — how to deploy and demo everything.
+- `CLI_REFERENCE.md` — every CLI flag, generated from the argparse definitions.
 - `plans/IMPLEMENTATION_REVIEW.md` — gaps vs. this architecture.
 - `plans/RECOGNITION_OPTIMIZATION_PLAN.md` — recognition pipeline contract.
 - `plans/MOTION_TRIGGERED_STREAM_STRATEGY.md` — session protocol.
