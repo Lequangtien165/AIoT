@@ -1,5 +1,7 @@
 import unittest
 
+import numpy as np
+
 from aiot.tracking.face_tracker import FaceTracker, iou
 
 
@@ -117,6 +119,58 @@ class FaceTrackerTests(unittest.TestCase):
 
         self.assertEqual(event.kind, "identity_changed")
         self.assertEqual(track.label, "Binh")
+
+    def test_embedding_change_bypasses_switch_margin(self):
+        tracker = FaceTracker(min_face_size=1, label_confirmations=1, label_switch_margin=0.05)
+        track = tracker.update([(0, 0, 100, 100)], 1)[0]
+        tracker.apply_recognition(track.track_id, "An", 0.8, 0.45)
+        tracker.record_embedding(track.track_id, np.array([1.0, 0.0], dtype="float32"), 0.6)
+        tracker.record_embedding(track.track_id, np.array([0.0, 1.0], dtype="float32"), 0.6)
+
+        self.assertTrue(track.force_reidentify)
+        event = tracker.apply_recognition(track.track_id, "Binh", 0.8, 0.45)
+
+        self.assertEqual(event.kind, "identity_changed")
+        self.assertFalse(track.force_reidentify)
+
+    def test_similar_embedding_keeps_switch_margin(self):
+        tracker = FaceTracker(min_face_size=1, label_confirmations=1, label_switch_margin=0.05)
+        track = tracker.update([(0, 0, 100, 100)], 1)[0]
+        tracker.apply_recognition(track.track_id, "An", 0.8, 0.45)
+        tracker.record_embedding(track.track_id, np.array([1.0, 0.0], dtype="float32"), 0.6)
+        tracker.record_embedding(track.track_id, np.array([0.999, 0.045], dtype="float32"), 0.6)
+
+        self.assertFalse(track.force_reidentify)
+        self.assertIsNone(tracker.apply_recognition(track.track_id, "Binh", 0.84, 0.45))
+
+    def test_embedding_change_ignored_before_match(self):
+        tracker = FaceTracker(min_face_size=1)
+        track = tracker.update([(0, 0, 100, 100)], 1)[0]
+        tracker.record_embedding(track.track_id, np.array([1.0, 0.0], dtype="float32"), 0.6)
+        tracker.record_embedding(track.track_id, np.array([0.0, 1.0], dtype="float32"), 0.6)
+
+        self.assertFalse(track.force_reidentify)
+
+    def test_reidentify_uses_fast_recognition_interval(self):
+        tracker = FaceTracker(
+            min_age_frames=1,
+            min_face_size=1,
+            recognition_interval_frames=1,
+            matched_recognition_interval_frames=10,
+            label_confirmations=1,
+        )
+        track = tracker.update([(0, 0, 100, 100)], 1)[0]
+        tracker.apply_recognition(track.track_id, "An", 0.8, 0.45)
+        tracker.select_for_recognition(2, maximum=1)
+
+        self.assertEqual(tracker.select_for_recognition(3, maximum=1), [])
+        tracker.record_embedding(track.track_id, np.array([1.0, 0.0], dtype="float32"), 0.6)
+        tracker.record_embedding(track.track_id, np.array([0.0, 1.0], dtype="float32"), 0.6)
+
+        self.assertEqual(
+            [selected.track_id for selected in tracker.select_for_recognition(4, maximum=1)],
+            [track.track_id],
+        )
 
 
 if __name__ == "__main__":
