@@ -220,10 +220,14 @@ def install_archive(
         print(f"  Installed successfully: {installed_executable}")
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install pinned local streaming tools.")
     parser.add_argument("--force", action="store_true", help="Reinstall tools even when verified.")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def verify_macos_ffmpeg(ffmpeg_path: Path) -> None:
