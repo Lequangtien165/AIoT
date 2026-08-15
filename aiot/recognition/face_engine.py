@@ -12,6 +12,8 @@ import onnxruntime as ort
 from insightface.app import FaceAnalysis
 from insightface.app.common import Face
 
+from aiot.recognition.runtime import RecognitionRuntime, get_recognition_runtime
+
 
 @dataclass(frozen=True)
 class FaceEmbedding:
@@ -42,24 +44,35 @@ class ProviderStatus:
 class FaceEngine:
     """Detect faces and generate embeddings with InsightFace."""
 
-    def __init__(self, det_size: int = 640) -> None:
+    def __init__(
+        self,
+        det_size: int = 640,
+        runtime: RecognitionRuntime | None = None,
+    ) -> None:
         if det_size <= 0:
             raise ValueError("Detection size must be greater than 0.")
+
+        runtime = runtime or get_recognition_runtime()
 
         if hasattr(ort, "preload_dlls"):
             ort.preload_dlls()
 
         available_providers = ort.get_available_providers()
-        preferred_providers = [
-            provider
-            for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
-            if provider in available_providers
+        provider_spec = [
+            entry
+            for entry in runtime.providers
+            if (entry[0] if isinstance(entry, tuple) else entry) in available_providers
         ]
-        if not preferred_providers:
+        if not provider_spec:
             raise RuntimeError(
                 "No supported ONNX Runtime providers were found. "
                 f"Available providers: {available_providers}"
             )
+
+        self.requested_providers = [
+            entry[0] if isinstance(entry, tuple) else entry
+            for entry in provider_spec
+        ]
 
         captured_stdout = io.StringIO()
         captured_stderr = io.StringIO()
@@ -67,13 +80,14 @@ class FaceEngine:
             self.app = FaceAnalysis(
                 name="buffalo_l",
                 allowed_modules=["detection", "recognition"],
-                providers=preferred_providers,
+                providers=provider_spec,
             )
 
-            # ctx_id=-1 runs inference on the CPU.
+            # ctx_id=-1 runs inference on the CPU, so the accelerator
+            # (CUDA on Windows, CoreML on macOS) must use a non-negative id.
             # det_size is the detector input resolution.
             self.app.prepare(
-                ctx_id=0 if "CUDAExecutionProvider" in preferred_providers else -1,
+                ctx_id=0 if runtime.accelerator_provider in available_providers else -1,
                 det_size=(det_size, det_size),
             )
 
@@ -82,7 +96,7 @@ class FaceEngine:
             for text in (captured_stdout.getvalue(), captured_stderr.getvalue())
             if text.strip()
         )
-        self.requested_providers = preferred_providers
+        self.accelerator_provider = runtime.accelerator_provider
         self.detector = self.app.models.get("detection")
         self.recognition_model = self.app.models.get("recognition")
         if self.detector is None or self.recognition_model is None:
@@ -90,12 +104,13 @@ class FaceEngine:
         self.detector_providers = self._model_providers(self.detector)
         self.recognition_providers = self._model_providers(self.recognition_model)
         self.providers = list(self.recognition_providers)
+        self._provider_introspection_complete = self._provider_queries_available()
         self.provider_status = ProviderStatus(
             requested=list(self.requested_providers),
             effective=list(self.providers),
             warning=self._build_provider_warning(),
-            gpu_requested="CUDAExecutionProvider" in self.requested_providers,
-            gpu_active=self._cuda_active_for_all_models(),
+            gpu_requested=self.accelerator_provider in self.requested_providers,
+            gpu_active=self._accelerator_active_for_all_models(),
         )
 
     def extract_embedding(
@@ -197,25 +212,33 @@ class FaceEngine:
             return list(session.get_providers())
         return list(self.requested_providers)
 
-    def _cuda_active_for_all_models(self) -> bool:
+    def _provider_queries_available(self) -> bool:
         return all(
-            "CUDAExecutionProvider" in providers
+            getattr(getattr(model, "session", None), "get_providers", None) is not None
+            for model in (self.detector, self.recognition_model)
+        )
+
+    def _accelerator_active_for_all_models(self) -> bool:
+        if not self._provider_introspection_complete:
+            return False
+        return all(
+            self.accelerator_provider in providers
             for providers in (self.detector_providers, self.recognition_providers)
         )
 
     def _build_provider_warning(self) -> str | None:
-        gpu_requested = "CUDAExecutionProvider" in self.requested_providers
-        gpu_active = self._cuda_active_for_all_models()
+        gpu_requested = self.accelerator_provider in self.requested_providers
+        gpu_active = self._accelerator_active_for_all_models()
         if not gpu_requested:
             return None
         if gpu_active:
             return None
         if self.startup_output:
             return (
-                "CUDAExecutionProvider was requested but InsightFace is running on CPU. "
+                f"{self.accelerator_provider} was requested but InsightFace is running on CPU. "
                 f"ONNX Runtime output: {self.startup_output}"
             )
         return (
-            "CUDAExecutionProvider was requested but InsightFace is running on CPU. "
-            "Check CUDA, cuBLAS, and cuDNN runtime DLL availability."
+            f"{self.accelerator_provider} was requested but InsightFace is running on CPU. "
+            "Check that the accelerator runtime is installed and configured correctly."
         )
