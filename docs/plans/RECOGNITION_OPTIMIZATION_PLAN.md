@@ -50,8 +50,11 @@ RTSP capture
 - Embeddings and FAISS gallery vectors remain normalized `float32`; inner
   product remains cosine similarity.
 - Latest-frame behavior remains bounded. Do not add an unbounded queue.
-- `--require-gpu` remains strict: CUDA must be active for both SCRFD and
-  ArcFace.
+- `--require-gpu` remains strict: the platform accelerator — CUDA on Windows
+  AMD64, CoreML on macOS Apple Silicon — must be active for both SCRFD and
+  ArcFace sessions. On macOS this guarantees `CoreMLExecutionProvider` binding
+  to both models, not GPU-only execution (`MLComputeUnits=ALL` may schedule
+  operators on GPU, Neural Engine, or CPU).
 
 ## InsightFace API Boundary
 
@@ -157,20 +160,29 @@ Unit tests must cover:
 
 ## Real-Model Validation
 
-Run on the Windows CUDA target with the installed `insightface==1.0.1` model:
+Run on the target with the installed `insightface==1.0.1` model — Windows
+AMD64 with CUDA, macOS Apple Silicon with CoreML:
 
 1. Compare a baseline `FaceAnalysis.get()` embedding with split SCRFD + ArcFace
    for the same face.
 2. Require cosine similarity `>= 0.99999` for representative images.
 3. Validate one face, unknown face, three faces, motion, and short occlusion.
-4. Verify CUDA is active for both detector and recognition sessions.
+4. Verify the platform accelerator is active for both detector and recognition
+   sessions: `CUDAExecutionProvider` on Windows, `CoreMLExecutionProvider` on
+   macOS (startup logs print both session provider lists). On macOS, each
+   CoreML session creation may compile its captured subgraph because
+   `ModelCacheDirectory` is not configured; expect this at detector and
+   recognition session creation, and record compilation time separately from
+   the warm-up window.
 
 Do not lower recognition thresholds to mask an alignment mismatch.
 
 ## Benchmark Protocol
 
-Use 1280x720 at 30 FPS, `--det-size 640`, `--recognition-fps 6`, CUDA required,
-30-second warm-up, and at least 120 seconds per scenario.
+Use 1280x720 at 30 FPS, `--det-size 640`, `--recognition-fps 6`, the platform
+accelerator required (`--require-gpu`), 30-second warm-up, and at least 120
+seconds per scenario. Run the same protocol on Windows AMD64 (CUDA) and macOS
+Apple Silicon (CoreML).
 
 | Scenario          | Required observation                                  |
 | ----------------- | ----------------------------------------------------- |
@@ -181,8 +193,13 @@ Use 1280x720 at 30 FPS, `--det-size 640`, `--recognition-fps 6`, CUDA required,
 | Short occlusion   | Track TTL and recognition revalidation remain correct |
 
 Record before/after capture FPS, display FPS, p50/p95 cycle latency, detector
-latency, embedding latency, GPU use, VRAM, time-to-first identity, detected
-faces, and embeddings per cycle.
+latency, embedding latency, time-to-first identity, detected faces, and
+embeddings per cycle. Record accelerator activity per platform: GPU use and
+VRAM with CUDA (`nvidia-smi`, Windows); CPU and GPU utilization via Activity
+Monitor (macOS). Activity Monitor does not expose Neural Engine activity; on
+Apple Silicon record ANE activity only when a verified measurement is
+available (for example `sudo powermetrics --samplers gpu_power`), otherwise
+record it as unavailable/unknown.
 
 ## Acceptance Criteria
 
