@@ -1,8 +1,208 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from aiot.recognition.face_engine import FaceDetection, FaceEngine, ProviderStatus
+from aiot.recognition.runtime import get_recognition_runtime
+
+
+class _FakeSession:
+    def __init__(self, providers):
+        self._providers = list(providers)
+
+    def get_providers(self):
+        return self._providers
+
+
+class _FakeModel:
+    def __init__(self, providers):
+        self.session = _FakeSession(providers)
+
+
+_MODEL_PROVIDERS: dict[str, list[str]] = {}
+
+
+class _NoSessionModel:
+    pass
+
+
+class _FakeFaceAnalysis:
+    last: "_FakeFaceAnalysis" = None
+
+    def __init__(self, **kwargs):
+        type(self).last = self
+        self.kwargs = kwargs
+        self.models = {
+            name: provider
+            for name, provider in _MODEL_PROVIDERS.items()
+        }
+
+    def prepare(self, ctx_id, det_size):
+        self.ctx_id = ctx_id
+        self.det_size = det_size
+
+
+class FaceEngineInitTests(unittest.TestCase):
+    def setUp(self):
+        _MODEL_PROVIDERS.clear()
+        _FakeFaceAnalysis.last = None
+
+    def _build(
+        self,
+        available_providers,
+        runtime,
+        detector_providers=None,
+        recognition_providers=None,
+        no_introspection=False,
+    ):
+        if no_introspection:
+            _MODEL_PROVIDERS["detection"] = _NoSessionModel()
+            _MODEL_PROVIDERS["recognition"] = _NoSessionModel()
+        else:
+            _MODEL_PROVIDERS["detection"] = _FakeModel(detector_providers or available_providers)
+            _MODEL_PROVIDERS["recognition"] = _FakeModel(recognition_providers or available_providers)
+        with mock.patch("aiot.recognition.face_engine.ort") as fake_ort, mock.patch(
+            "aiot.recognition.face_engine.FaceAnalysis",
+            side_effect=_FakeFaceAnalysis,
+        ) as fake_analysis, mock.patch(
+            "aiot.recognition.face_engine.get_recognition_runtime",
+            return_value=runtime,
+        ):
+            fake_ort.get_available_providers.return_value = list(available_providers)
+            engine = FaceEngine()
+            return engine, fake_analysis, _FakeFaceAnalysis.last
+
+    def test_coreml_binds_to_both_models_when_available(self):
+        runtime = get_recognition_runtime("Darwin", "arm64")
+
+        engine, fake_analysis, app = self._build(
+            ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+            runtime,
+        )
+
+        self.assertEqual(
+            fake_analysis.call_args.kwargs["providers"],
+            [
+                ("CoreMLExecutionProvider", {"MLComputeUnits": "ALL", "RequireStaticInputShapes": "0"}),
+                "CPUExecutionProvider",
+            ],
+        )
+        self.assertEqual(app.ctx_id, 0)
+        self.assertEqual(app.det_size, (640, 640))
+        self.assertEqual(engine.accelerator_provider, "CoreMLExecutionProvider")
+        self.assertEqual(engine.requested_providers, ["CoreMLExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(engine.providers, ["CoreMLExecutionProvider", "CPUExecutionProvider"])
+        self.assertTrue(engine.provider_status.gpu_requested)
+        self.assertTrue(engine.provider_status.gpu_active)
+        self.assertIsNone(engine.provider_status.warning)
+
+    def test_coreml_unavailable_falls_back_to_cpu(self):
+        runtime = get_recognition_runtime("Darwin", "arm64")
+
+        engine, fake_analysis, app = self._build(
+            ["CPUExecutionProvider"],
+            runtime,
+        )
+
+        self.assertEqual(fake_analysis.call_args.kwargs["providers"], ["CPUExecutionProvider"])
+        self.assertEqual(app.ctx_id, -1)
+        self.assertEqual(engine.provider_status.gpu_requested, False)
+        self.assertEqual(engine.provider_status.gpu_active, False)
+        self.assertIsNone(engine.provider_status.warning)
+
+    def test_coreml_bound_to_one_model_is_not_active(self):
+        runtime = get_recognition_runtime("Darwin", "arm64")
+
+        engine, fake_analysis, app = self._build(
+            ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+            runtime,
+            detector_providers=["CoreMLExecutionProvider", "CPUExecutionProvider"],
+            recognition_providers=["CPUExecutionProvider"],
+        )
+
+        self.assertEqual(app.ctx_id, 0)
+        self.assertEqual(engine.provider_status.gpu_active, False)
+        self.assertIsNotNone(engine.provider_status.warning)
+        self.assertIn("CoreMLExecutionProvider", engine.provider_status.warning)
+        self.assertNotIn("cuBLAS", engine.provider_status.warning)
+
+    def test_windows_cuda_binds_to_both_models(self):
+        runtime = get_recognition_runtime("Windows", "AMD64")
+
+        engine, fake_analysis, app = self._build(
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            runtime,
+        )
+
+        self.assertEqual(
+            fake_analysis.call_args.kwargs["providers"],
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        self.assertEqual(app.ctx_id, 0)
+        self.assertEqual(engine.accelerator_provider, "CUDAExecutionProvider")
+        self.assertTrue(engine.provider_status.gpu_requested)
+        self.assertTrue(engine.provider_status.gpu_active)
+        self.assertIsNone(engine.provider_status.warning)
+
+    def test_windows_cuda_unavailable_falls_back_to_cpu(self):
+        runtime = get_recognition_runtime("Windows", "AMD64")
+
+        engine, fake_analysis, app = self._build(
+            ["CPUExecutionProvider"],
+            runtime,
+        )
+
+        self.assertEqual(fake_analysis.call_args.kwargs["providers"], ["CPUExecutionProvider"])
+        self.assertEqual(app.ctx_id, -1)
+        self.assertEqual(engine.provider_status.gpu_requested, False)
+        self.assertEqual(engine.provider_status.gpu_active, False)
+        self.assertIsNone(engine.provider_status.warning)
+
+
+    def test_missing_session_introspection_is_fail_closed(self):
+        runtime = get_recognition_runtime("Darwin", "arm64")
+
+        engine, fake_analysis, app = self._build(
+            ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+            runtime,
+            no_introspection=True,
+        )
+
+        self.assertEqual(
+            fake_analysis.call_args.kwargs["providers"],
+            [
+                ("CoreMLExecutionProvider", {"MLComputeUnits": "ALL", "RequireStaticInputShapes": "0"}),
+                "CPUExecutionProvider",
+            ],
+        )
+        self.assertEqual(app.ctx_id, 0)
+        self.assertTrue(engine.provider_status.gpu_requested)
+        self.assertFalse(engine.provider_status.gpu_active)
+        self.assertIsNotNone(engine.provider_status.warning)
+
+    def test_injected_runtime_bypasses_platform_detection(self):
+        windows_runtime = get_recognition_runtime("Windows", "AMD64")
+        _MODEL_PROVIDERS["detection"] = _FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"])
+        _MODEL_PROVIDERS["recognition"] = _FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"])
+        with mock.patch("aiot.recognition.face_engine.ort") as fake_ort, mock.patch(
+            "aiot.recognition.face_engine.FaceAnalysis",
+            side_effect=_FakeFaceAnalysis,
+        ) as fake_analysis, mock.patch(
+            "aiot.recognition.face_engine.get_recognition_runtime",
+            side_effect=AssertionError("platform detection must not run when runtime is injected"),
+        ):
+            fake_ort.get_available_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            engine = FaceEngine(runtime=windows_runtime)
+            app = _FakeFaceAnalysis.last
+
+        self.assertEqual(
+            fake_analysis.call_args.kwargs["providers"],
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        self.assertEqual(app.ctx_id, 0)
+        self.assertEqual(engine.accelerator_provider, "CUDAExecutionProvider")
+        self.assertTrue(engine.provider_status.gpu_active)
 
 
 class ProviderStatusTests(unittest.TestCase):
