@@ -1,11 +1,13 @@
 # Current Implementation Review
 
-> **Status**: Current (2026-08-08) — codebase vs. architecture review, current gaps.
+> **Status**: Current (2026-08-15) — codebase vs. architecture review, current gaps.
 > Part of the [documentation hub](../README.md).
 
 > Updated 2026-08-08 after Gate 1 (profile-based edge deployment) and Gate 2
-> (MQTT edge control). The original review predates both gates; stale claims
-> below have been corrected to the current codebase state.
+> (MQTT edge control). Updated 2026-08-15 for macOS CoreML recognition code
+> support; hardware validation on macOS remains pending (Batch 8 of
+> `MACOS_COREML_RECOGNITION_PLAN.md`). The original review predates both gates;
+> stale claims below have been corrected to the current codebase state.
 
 ## Scope
 
@@ -18,12 +20,12 @@ This review compares the current codebase with `IMPLEMENTATION_PLAN.md` and `../
 | Generic Windows DirectShow / macOS AVFoundation / Linux ARM64 V4L2 RTSP publisher | Implemented, profile-based (`dshow`, `avfoundation`, `v4l2`) |
 | Raspberry Pi Camera CSI direct publisher | Implemented (`rpi-csi` profile, MediaMTX `rpiCamera` + hardware H.264, no FFmpeg); validated manually on 2026-08-05, automated profile/systemd pending hardware re-validation |
 | Cloud MediaPipe detection | Implemented |
-| Windows InsightFace and FAISS recognition | Implemented |
+| InsightFace and FAISS recognition (Windows AMD64 CUDA, macOS Apple Silicon CoreML) | Implemented in code (`aiot/recognition/runtime.py`, `FaceEngine` provider order, CLI platform gate); macOS hardware validation pending (Batch 8); Windows CUDA hardware validation remains pending re-run |
 | MQTT broker, scoped topics, TLS, ACL, audit logger | Implemented; broker restart/reconnect, retained replay, and unauthorized-publish cases covered by opt-in integration tests |
 | Software motion-triggered edge session | Implemented and validated on Windows; Pi software-motion adapter pending |
 | Persistent edge control (status/start/stop/restart) | Implemented (`run_edge_agent.py` + `EdgeSupervisor` state machine, command-id idempotency, ack with resulting state) |
 | Browser live-surveillance web service | Not implemented |
-| Calibration, endurance, and benchmark evidence | Incomplete (threshold calibration intentionally deferred; demo closes first) |
+| Calibration, endurance, and benchmark evidence | Incomplete per platform (threshold calibration intentionally deferred; demo closes first; macOS CoreML benchmark requires Batch 8) |
 
 The current demonstrable flow is:
 
@@ -74,6 +76,7 @@ Generic edge camera (or Pi CSI)
 1. No automated test covers `run_motion_triggered`, camera handoff, or actual FFmpeg and OpenCV ownership transitions.
 2. Pi Camera CSI with the `rpi-csi` profile, `rpicam-*` preflight on the real device, hardware H.264 behavior, temperature, systemd boot recovery, and session cycling remain unverified since the Gate 1 automation.
 3. Recognition threshold calibration (intentionally deferred), sustained runtime, FPS/latency measurements, VRAM/RAM measurements, and multi-face fairness evidence remain incomplete.
+4. macOS CoreML recognition is implemented in code but not yet validated on hardware: environment setup (`ort.get_available_providers()` includes `CoreMLExecutionProvider`), both SCRFD and ArcFace sessions binding CoreML, enrollment/static recognition, and a sustained `--require-gpu` realtime run are all pending Batch 8 of `MACOS_COREML_RECOGNITION_PLAN.md`. macOS must not be marked "validated" until that batch passes.
 
 ## Existing Test Coverage
 
@@ -90,6 +93,7 @@ Generic edge camera (or Pi CSI)
 - `../RUNBOOK.md` is the single end-to-end operations runbook with the verified demo sequence.
 - `IMPLEMENTATION_PLAN.md` was updated to the current status table.
 - The README CUDA verification command checks only the detector session and uses a personal hard-coded model path. It does not prove ArcFace CUDA availability required by `--require-gpu`.
+- Provider verification for `--require-gpu` is per platform and covers both models: Windows checks `CUDAExecutionProvider`, macOS checks `CoreMLExecutionProvider`; the authoritative check is `FaceEngine.provider_status.gpu_active` plus the startup `SCRFD providers` / `ArcFace providers` lines, which is what the README macOS section and the runbook use.
 
 ## Recommended Priority
 
