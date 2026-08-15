@@ -18,8 +18,8 @@ cannot drift. All commands run from the repository root.
 |---|---|---|---|---|
 | `python app.py` | Reconnecting MediaPipe face-detection preview of an RTSP stream. | Windows AMD64 and macOS Apple Silicon (needs the BlazeFace model) | 3 flags | 0 |
 | `python stream_server.py` | Publish a webcam to a MediaMTX RTSP stream; owns MediaMTX and optionally FFmpeg. | Windows, macOS, Linux ARM64 (profile auto-detected; rpi-csi must be explicit) | 25 flags | 0 |
-| `python recognize_stream.py` | Realtime InsightFace + FAISS recognition of an RTSP stream; publishes recognition/result over MQTT. | Windows AMD64 only | 28 flags | 0 |
-| `python recognize_image.py IMAGE` | One-shot image recognition against the FAISS enrollment index. | Windows AMD64 only | 2 flags + 1 positional | 1 |
+| `python recognize_stream.py` | Realtime InsightFace + FAISS recognition of an RTSP stream; publishes recognition/result over MQTT. | Windows AMD64 (CUDA) and macOS Apple Silicon (CoreML) | 28 flags | 0 |
+| `python recognize_image.py IMAGE` | One-shot image recognition against the FAISS enrollment index. | Windows AMD64 (CUDA); macOS Apple Silicon (CoreML, pending validation) | 2 flags + 1 positional | 1 |
 | `python scripts/run_edge_agent.py` | Persistent MQTT supervisor that owns a stream_server.py publisher child. | Windows, macOS, Linux ARM64 | 23 flags | 2 |
 | `python scripts/run_dashboard.py` | Web guard console: WebRTC video, recognition overlay, event timeline, edge control. | Windows, macOS (requires requirements-dashboard.txt) | 14 flags | 0 |
 | `python scripts/run_mqtt_logger.py` | Persist recognition/motion/error/ack events to database/audit_log.sqlite3. | Windows, macOS, Linux | 9 flags | 0 |
@@ -77,7 +77,7 @@ Platform: Windows, macOS, Linux ARM64 (profile auto-detected; rpi-csi must be ex
 
 Realtime InsightFace + FAISS recognition of an RTSP stream; publishes recognition/result over MQTT.
 
-Platform: Windows AMD64 only.
+Platform: Windows AMD64 (CUDA) and macOS Apple Silicon (CoreML).
 
 | Flag | Type | Default | Required | Description |
 |---|---|---|---|---|
@@ -97,7 +97,7 @@ Platform: Windows AMD64 only.
 | `--snapshot-dir` | str | — | no | Directory for snapshots on MATCH or identity change. |
 | `--no-mirror` | flag | `false` | no | Do not mirror the preview; keep published boxes in the raw video space. |
 | `--profile` | flag | `false` | no | Print capture, display, and recognition profiling. Not the camera profile flag used by stream_server.py. |
-| `--require-gpu` | flag | `false` | no | Exit if CUDAExecutionProvider is not active. |
+| `--require-gpu` | flag | `false` | no | Exit if the platform accelerator (CUDA on Windows, CoreML on macOS) is not active. |
 | `--reconnect-delay` | float | `2.0` | no | Seconds between RTSP reconnect attempts (default: 2.0). |
 | `--mqtt-host` | str | — | no | MQTT broker host for recognition/result events. |
 | `--mqtt-port` | int | `1883` | no | MQTT broker port (default: 1883). |
@@ -115,7 +115,7 @@ Platform: Windows AMD64 only.
 
 One-shot image recognition against the FAISS enrollment index.
 
-Platform: Windows AMD64 only.
+Platform: Windows AMD64 (CUDA); macOS Apple Silicon (CoreML, pending validation).
 
 | Flag | Type | Default | Required | Description |
 |---|---|---|---|---|
@@ -176,7 +176,7 @@ Platform: Windows, macOS (requires requirements-dashboard.txt).
 | `--mqtt-username` | str | — | no | MQTT username. Password is read from --mqtt-password-env. |
 | `--mqtt-password-env` | str | — | no | Environment variable containing the MQTT password. |
 | `--mqtt-ca-cert` | str | — | no | CA certificate path for TLS MQTT connections. |
-| `--audit-db` | str | `database\audit_log.sqlite3` | no | SQLite audit database to read (default: database/audit_log.sqlite3). |
+| `--audit-db` | str | `database/audit_log.sqlite3` | no | SQLite audit database to read (default: database/audit_log.sqlite3). |
 | `--wanted-config` | str | — | no | Path to the wanted-person JSON config (default: config/wanted.json). |
 | `--snapshot-dir` | str | — | no | Recognition snapshot directory served at /snapshots/* (optional). |
 
@@ -291,7 +291,8 @@ cloud face-presence leases through an authenticated loopback channel.
 | Capability | Windows AMD64 | macOS Apple Silicon | Linux ARM64 (Pi) |
 |---|---|---|---|
 | MediaPipe preview (`app.py`) | yes | yes | no |
-| Recognition (`recognize_stream.py`, `recognize_image.py`) | yes | no | no |
+| Recognition stream (`recognize_stream.py`) | yes (CUDA) | yes (CoreML, CPU fallback) | no |
+| Recognition image (`recognize_image.py`) | yes (CUDA) | yes (CoreML, pending validation) | no |
 | Publisher (`stream_server.py`) | dshow | avfoundation | v4l2 / rpi-csi |
 | Edge agent (`scripts/run_edge_agent.py`) | yes | yes | yes |
 | Dashboard / audit logger | yes | yes | yes |
