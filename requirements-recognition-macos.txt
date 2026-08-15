@@ -1,0 +1,12 @@
+# Install after requirements.txt on macOS Apple Silicon (arm64) and Python 3.12+; macOS 14+ required.
+# CoreML acceleration comes from the stock onnxruntime macOS arm64 wheel (CoreMLExecutionProvider included).
+# Do not install onnxruntime-gpu, onnxruntime-silicon, or onnxruntime-coreml in this environment.
+-r requirements.txt
+
+onnxruntime==1.28.0
+faiss-cpu==1.14.3
+onnx
+scipy
+scikit-image
+tqdm
+requests

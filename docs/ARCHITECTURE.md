@@ -25,9 +25,9 @@ Edge (Windows / macOS / Linux ARM64 / Raspberry Pi)
                                     -> WebRTC :8889/camera (browser)
               ^ supervised by stream_server.py (per profile)
               |
-Cloud laptop (Windows AMD64)
+Cloud laptop (Windows AMD64 / macOS Apple Silicon)
   app.py               MediaPipe preview (reconnecting RTSP client)
-  recognize_stream.py  InsightFace SCRFD + ArcFace -> FAISS -> MQTT recognition/result
+  recognize_stream.py  InsightFace SCRFD + ArcFace -> FAISS -> MQTT recognition/result (CUDA / CoreML)
   run_mqtt_logger.py   audit -> SQLite (recognition/result, motion/detected, error/#, control/ack/+)
   run_dashboard.py     FastAPI + WebSocket: live video, boxes, timeline, edge control
   Mosquitto (Docker)   broker: localhost plaintext 1883, LAN TLS 8883, ACLs
@@ -127,17 +127,34 @@ FFmpeg starts.
 ## 5. Cloud Recognition
 
 - `app.py`: reconnecting MediaPipe preview (cross-platform).
-- `recognize_stream.py` (Windows AMD64 only): latest-frame capture thread +
-  background recognition worker + display loop. InsightFace `buffalo_l`:
-  SCRFD detects all faces, `FaceTracker` assigns by `track_id`, ArcFace embeds
-  only scheduler-selected tracks (default budget: 1 embedding/cycle) using
-  matching five-point landmarks — never `FaceAnalysis.get()` in the realtime
-  path. FAISS `IndexFlatIP` over normalized embeddings = cosine similarity;
-  `FaceRecognizer` + `FaceTracker` confirmation/TTL rules.
+- `recognize_stream.py` (Windows AMD64 and macOS Apple Silicon): latest-frame
+  capture thread + background recognition worker + display loop. InsightFace
+  `buffalo_l`: SCRFD detects all faces, `FaceTracker` assigns by `track_id`,
+  ArcFace embeds only scheduler-selected tracks (default budget: 1
+  embedding/cycle) using matching five-point landmarks — never
+  `FaceAnalysis.get()` in the realtime path. FAISS `IndexFlatIP` over
+  normalized embeddings = cosine similarity; `FaceRecognizer` +
+  `FaceTracker` confirmation/TTL rules.
+- Recognition runtime: `aiot/recognition/runtime.py` selects the provider
+  order per platform — `CUDAExecutionProvider, CPUExecutionProvider` on
+  Windows AMD64; `CoreMLExecutionProvider, CPUExecutionProvider` (options
+  `MLComputeUnits=ALL`, `RequireStaticInputShapes=0`) on macOS Apple Silicon.
+  Only providers present in `ort.get_available_providers()` are requested;
+  CPU is the fallback. `recognize_stream.py` rejects unsupported platforms
+  before importing the heavy recognition stack (FAISS, ONNX Runtime,
+  InsightFace); `build_index.py` and `recognize_image.py` import recognition
+  modules directly and fail on import or at runtime on unsupported hosts.
+- `--require-gpu` fails fast unless both SCRFD and ArcFace sessions report the
+  platform accelerator (`CUDAExecutionProvider` on Windows,
+  `CoreMLExecutionProvider` on macOS). On macOS this guarantees CoreML EP is
+  bound to both models; CoreML may still schedule individual operators on the
+  GPU, Neural Engine, or CPU (`MLComputeUnits=ALL`), so it is not a GPU-only
+  guarantee.
 - `build_index.py` builds `database/faces.index` + `metadata.json` (one-to-one)
   from `dataset/<person>/`.
-- `--require-gpu` fails unless both SCRFD and ArcFace use CUDA.
 - Emits `recognition/result` and `error/pipeline/<device>` to MQTT.
+- The latest-frame capture, tracking, one-embedding-per-cycle budget, FAISS
+  cosine search, and MQTT schema are identical on Windows and macOS.
 
 ## 6. Audit And Security
 

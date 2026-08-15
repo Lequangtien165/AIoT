@@ -52,13 +52,13 @@ ENTRIES: list[Entry] = [
         module="recognize_stream",
         command="python recognize_stream.py",
         purpose="Realtime InsightFace + FAISS recognition of an RTSP stream; publishes recognition/result over MQTT.",
-        platform="Windows AMD64 only",
+        platform="Windows AMD64 (CUDA) and macOS Apple Silicon (CoreML)",
     ),
     Entry(
         module="recognize_image",
         command="python recognize_image.py IMAGE",
         purpose="One-shot image recognition against the FAISS enrollment index.",
-        platform="Windows AMD64 only",
+        platform="Windows AMD64 (CUDA); macOS Apple Silicon (CoreML, pending validation)",
     ),
     Entry(
         module="scripts.run_edge_agent",

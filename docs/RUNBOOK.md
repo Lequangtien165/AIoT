@@ -16,7 +16,7 @@ complete flag reference of every command, see `docs/CLI_REFERENCE.md`.
 | Broker                    | Docker host (localhost only, or LAN with TLS)                 | Mosquitto 2.0                                  |
 | Controller                | any host with the repo                                        | `mosquitto_sub` or a small paho script         |
 | Audit logger              | broker host or cloud                                          | `scripts/run_mqtt_logger.py`                   |
-| Cloud consumer            | Windows AMD64 with GPU                                        | `app.py`, `recognize_stream.py`                |
+| Cloud consumer            | Windows AMD64 (CUDA) or macOS Apple Silicon (CoreML) | `app.py`, `recognize_stream.py`                |
 | Dashboard (guard console) | broker host or cloud                                          | `scripts/run_dashboard.py` (FastAPI) + browser |
 
 Profiles: `dshow` (Windows), `avfoundation` (macOS), `v4l2` (Linux, USB), and
@@ -33,12 +33,21 @@ python scripts/setup_tools.py          # pinned FFmpeg + MediaMTX (Windows), Med
 python -m pip install paho-mqtt        # MQTT control plane
 ```
 
-- macOS: `brew install ffmpeg`; grant camera access in System Settings > Privacy.
+- macOS: `brew install python@3.12 ffmpeg`; create the venv with `python3.12`;
+  grant camera access in System Settings > Privacy.
+- macOS cloud recognition additionally (macOS 14+ Apple Silicon, Python 3.12):
+  - `pip install -r requirements-recognition-macos.txt`
+  - `pip install --no-deps insightface==1.0.1`
+  - `pip check` must report only InsightFace's `opencv-python` requirement as
+    unsatisfied (expected with `--no-deps`, which protects
+    `opencv-contrib-python`); no other conflicts, and
+    `python -c "import onnxruntime as ort; print(ort.get_available_providers())"`
+    must list `CoreMLExecutionProvider`.
 - Linux ARM64: `sudo apt install -y ffmpeg v4l-utils`.
 - Raspberry Pi: 64-bit Bookworm, `sudo apt install -y ffmpeg v4l-utils rpicam-apps`,
   `sudo usermod -aG video "$USER"`, enable the camera in `raspi-config`.
 - Windows cloud recognition additionally: `requirements-recognition-windows.txt`
-  - `pip install --no-deps insightface==1.0.1`.
+  - `pip install --no-deps insightface==1.0.1` (dependency set unchanged).
 
 ## 2. Broker (Role: Broker Host)
 
@@ -171,7 +180,7 @@ The agent is the sole MQTT client for its publisher child: it relays
 `face_presence` leases. Do not add `--no-mqtt` or run a second publisher beside
 the agent.
 
-### 2b.4 Cloud recognition, logger, dashboard (Windows laptop)
+### 2b.4 Cloud recognition, logger, dashboard (cloud laptop)
 
 Run each in its own terminal. Every component uses the same
 `--mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 --mqtt-ca-cert ...` and unique
@@ -195,6 +204,42 @@ python recognize_stream.py `
 `--no-mirror` keeps the published bounding boxes in the same (unmirrored) space
 as the dashboard video; `--snapshot-dir .\snapshots` must match the dashboard's
 `--snapshot-dir` so event-drawer snapshots resolve.
+
+On a macOS Apple Silicon cloud laptop (macOS 14+), the same pipeline runs from
+Bash with the CoreML accelerator:
+
+```bash
+# Recognition pipeline (CoreML)
+export AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py \
+  --source "rtsp://<EDGE_LAN_IP>:8554/camera" \
+  --require-gpu \
+  --no-mirror \
+  --snapshot-dir ./snapshots \
+  --edge-triggered-session --face-presence-interval 15 \
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 \
+  --mqtt-ca-cert config/mosquitto/certs/ca.crt \
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 \
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+Expected provider logs on macOS:
+
+```text
+SCRFD providers: CoreMLExecutionProvider, CPUExecutionProvider
+ArcFace providers: CoreMLExecutionProvider, CPUExecutionProvider
+CoreMLExecutionProvider active
+```
+
+`--require-gpu` succeeds only when both sessions bind CoreML. That binding does
+not mean every operator runs on the GPU: `MLComputeUnits=ALL` lets CoreML
+schedule each operator on the GPU, Neural Engine, or CPU. Distinguish a missing
+provider from a model fallback: if `ort.get_available_providers()` lacks
+`CoreMLExecutionProvider`, startup prints `CPU only` and the environment is
+broken (see README "macOS Recognition Setup"); if it is listed but a session
+reports only CPU, startup prints
+`CoreMLExecutionProvider requested but unavailable, using CPU` and the model
+fell back — rerun with `--require-gpu` and read the fail-fast diagnostic.
 
 ```powershell
 # Audit logger
@@ -378,6 +423,32 @@ python recognize_stream.py `
 `--no-mirror` publishes boxes in the same unmirrored space as the dashboard
 video; drop it only if the dashboard mirrors the video instead (CSS flip).
 
+On macOS Apple Silicon, the same flow uses Bash; `--require-gpu` then demands
+CoreML on both models:
+
+```bash
+python app.py --source "rtsp://<EDGE_IP>:8554/camera"          # MediaPipe preview
+python build_index.py                                          # rebuild after dataset changes
+export AIOT_MQTT_PASSWORD='<recognition-password>'
+python recognize_stream.py \
+  --source "rtsp://<EDGE_IP>:8554/camera" \
+  --require-gpu \
+  --no-mirror \
+  --snapshot-dir ./snapshots \
+  --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 \
+  --mqtt-ca-cert config/mosquitto/certs/ca.crt \
+  --mqtt-client-id aiot-recognition --source-device-id pi4-edge-01 \
+  --mqtt-username aiot-recognition --mqtt-password-env AIOT_MQTT_PASSWORD
+```
+
+Expected startup logs show `CoreMLExecutionProvider` for both SCRFD and ArcFace
+before `CPUExecutionProvider`, and `CoreMLExecutionProvider active`. A
+CoreML-bound session may still run individual operators on CPU through
+`MLComputeUnits=ALL`; that is by design and is not a fallback. If CoreML is
+listed in `ort.get_available_providers()` but the models report CPU only, the
+session fell back — check `FaceEngine.provider_status.warning` and rerun with
+`--require-gpu` for the fail-fast exit.
+
 `recognize_stream.py` publishes `recognition/result` (schema: `frame_id`,
 `result_id`, `tracks`, `events`, `source` redacted) that the audit logger
 persists. Consumers reconnect automatically after publisher restarts.
@@ -425,7 +496,8 @@ otherwise). Do not run the systemd unit and `run_edge_agent.py` at the same time
 | Preflight: "camera enumeration failed" / "no cameras" (Pi) | CSI cable or raspi-config camera off         | `sudo raspi-config` > Interface Options > Camera                                                                                                                                                                |
 | Preflight: "RTSP port already in use"                      | another publisher/player holds 8554          | stop it, or check `tasklist`/`pgrep` for mediamtx                                                                                                                                                               |
 | Controller sees no acks                                    | ACL mismatch or wrong device_id              | check `config/mosquitto/aclfile` (LF line endings), same `--mqtt-client-id`                                                                                                                                     |
-| `recognize_stream.py` not recognized on GPU                | missing `--require-gpu` flag                 | see README "Windows Recognition Setup"                                                                                                                                                                          |
+| `recognize_stream.py` not recognized on GPU                | missing `--require-gpu` flag                 | see README "Windows Recognition Setup" / "macOS Recognition Setup"                                                                                                                                              |
+| Recognition reports CPU only on macOS                       | CoreML EP missing or model fallback          | verify `ort.get_available_providers()` lists `CoreMLExecutionProvider` (README "macOS Recognition Setup"); each process recompiles models for CoreML at session creation (no persistent cache), so startup is slower; `--require-gpu` fails fast with the provider name |
 | Agent publish rejected "No matching subscribers"           | controller not subscribed to `control/ack/+` | subscribe first, then send commands                                                                                                                                                                             |
 | Mosquitto ACL silently matching nothing                    | CRLF line endings in `config/mosquitto/*`    | keep LF (`.gitattributes` enforces)                                                                                                                                                                             |
 | Dashboard video stuck on "Video unavailable"               | MediaMTX WebRTC not reachable                | verify `webrtc: true` in the config MediaMTX actually uses; check `--video-url` (Pi: `http://<PI_IP>:8889`); open UDP `8189`; on multi-NIC hosts set `webrtcAdditionalHosts: [<LAN_IP>]` in the MediaMTX config |

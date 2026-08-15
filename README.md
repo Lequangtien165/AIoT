@@ -1,11 +1,11 @@
 # AIoT Face Detection and Recognition
 
-This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection. Windows AMD64 also supports local face recognition with InsightFace and FAISS, with NVIDIA CUDA used when the local ONNX Runtime GPU dependencies are available. Linux ARM64 supports RTSP publishing from V4L2 cameras for edge validation; it does not run the recognition pipeline.
+This project supports Windows AMD64 and macOS Apple Silicon for RTSP face detection and local face recognition with InsightFace and FAISS. Windows uses NVIDIA CUDA and macOS uses Apple CoreML through ONNX Runtime's `CoreMLExecutionProvider` (with CPU fallback) when the local ONNX Runtime accelerator dependencies are available. Linux ARM64 supports RTSP publishing from V4L2 cameras for edge validation; it does not run the recognition pipeline.
 
 ```text
 Module 1: Webcam -> FFmpeg -> MediaMTX -> rtsp://127.0.0.1:8554/camera
 Module 2: RTSP -> OpenCV + MediaPipe -> local window with green face boxes
-Module 3: RTSP -> InsightFace + FAISS -> named face boxes (Windows only)
+Module 3: RTSP -> InsightFace + FAISS -> named face boxes (Windows AMD64 and macOS Apple Silicon)
 ```
 
 The publisher does not analyze, mirror, resize, or annotate the webcam image. The detector does not republish its annotated video.
@@ -38,7 +38,7 @@ aiot/
 ## Requirements
 
 - A supported platform with an available webcam: Windows AMD64 or macOS Apple Silicon
-- Python 3.12 recommended. Windows has also been verified with Python 3.14.
+- Python 3.12 recommended. Windows has also been verified with Python 3.14. Recognition on macOS requires macOS 14 or newer on Apple Silicon with Python 3.12.
 - Internet access once to download MediaMTX
 
 ## Setup
@@ -105,7 +105,7 @@ python scripts/setup_tools.py --force
 
 ### Windows Recognition Setup
 
-Install the Windows-only recognition backend after the common dependencies. Install InsightFace without its dependencies so it cannot install `opencv-python` alongside `opencv-contrib-python`.
+Install the Windows recognition backend after the common dependencies. Install InsightFace without its dependencies so it cannot install `opencv-python` alongside `opencv-contrib-python`.
 
 ```powershell
 python -m pip install -r requirements-recognition-windows.txt
@@ -121,6 +121,32 @@ python -c "import onnxruntime as ort; ort.preload_dlls(directory=''); print('ava
 ```
 
 The expected result includes `CUDAExecutionProvider` in `active`. If `active` is only `CPUExecutionProvider`, run recognition with `--require-gpu` to confirm the failure before tuning performance.
+
+### macOS Recognition Setup
+
+On macOS Apple Silicon (macOS 14+), install the recognition backend after the common dependencies. `requirements-recognition-macos.txt` pins the official `onnxruntime` macOS arm64 wheel, which already ships `CoreMLExecutionProvider`; do not install `onnxruntime-gpu`, `onnxruntime-silicon`, or `onnxruntime-coreml` alongside it. Install InsightFace without its dependencies so it cannot replace `opencv-contrib-python`:
+
+```bash
+python -m pip install -r requirements-recognition-macos.txt
+python -m pip install --no-deps insightface==1.0.1
+python -m pip check
+```
+
+`pip check` will report exactly one unsatisfied requirement — `insightface 1.0.1` lists `opencv-python` in its package metadata — because InsightFace is installed with `--no-deps` so it cannot replace `opencv-contrib-python`. Treat any other conflict as a real problem.
+
+Verify that ONNX Runtime exposes the CoreML provider:
+
+```bash
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+`CoreMLExecutionProvider` must appear in the list. Then verify InsightFace binds it to both models on the first `FaceEngine` construction:
+
+```bash
+python -c "from aiot.recognition.face_engine import FaceEngine; e=FaceEngine(); print(e.accelerator_provider); print(e.detector_providers); print(e.recognition_providers); print(e.provider_status.gpu_active)"
+```
+
+Expected: `CoreMLExecutionProvider` listed before `CPUExecutionProvider` for both models, and `True` as the last value. If `gpu_active` is `False`, run recognition with `--require-gpu` to confirm the failure before tuning performance. ONNX Runtime compiles the models for CoreML when a session is created; without a configured `ModelCacheDirectory` the compilation is not persisted between processes, so each new process can take noticeably longer on startup than steady-state runs.
 
 Build the enrollment index before recognition. Enrollment images belong in `dataset/<person>/` and must have one face each.
 
@@ -309,9 +335,9 @@ When the publisher is stopped or the stream temporarily fails, the detector keep
 Every flag of every command is listed in
 [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
-## Realtime Recognition (Windows Only)
+## Realtime Recognition
 
-After starting the RTSP publisher and building the index, open a second PowerShell terminal on Windows:
+After starting the RTSP publisher and building the index, open a second terminal. On Windows AMD64, use PowerShell:
 
 ```powershell
 .venv\Scripts\Activate.ps1
@@ -323,8 +349,25 @@ The startup log should include:
 ```text
 SCRFD providers: CUDAExecutionProvider, CPUExecutionProvider
 ArcFace providers: CUDAExecutionProvider, CPUExecutionProvider
-GPU active
+CUDAExecutionProvider active
 ```
+
+On macOS Apple Silicon (macOS 14+), use Bash:
+
+```bash
+source .venv/bin/activate
+python recognize_stream.py --recognition-fps 2 --profile --require-gpu
+```
+
+The startup log should include:
+
+```text
+SCRFD providers: CoreMLExecutionProvider, CPUExecutionProvider
+ArcFace providers: CoreMLExecutionProvider, CPUExecutionProvider
+CoreMLExecutionProvider active
+```
+
+Each macOS process compiles the ONNX models for CoreML when its sessions start; because no model cache directory is configured, this is a one-time cost per process, not per machine — expect slower startup, especially before the first inference. `MLComputeUnits=ALL` lets CoreML schedule each operator on the GPU, Neural Engine, or CPU, so `--require-gpu` guarantees both ONNX sessions are bound to `CoreMLExecutionProvider` — it does not mean every operator runs on the GPU.
 
 The production recognition path uses the InsightFace `buffalo_l` bundle only. SCRFD detects every face for tracking, then ArcFace creates an embedding only for scheduler-selected tracks. The default budget is one embedding per detection cycle, so a crowded frame does not trigger ArcFace work for every face at once. The display loop stays responsive because frame capture, inference, and rendering run as separate stages. Press `Q`, `Esc`, or `Ctrl+C` to stop. If `--recognition-fps 2` is stable, increase it gradually:
 
@@ -337,7 +380,7 @@ python recognize_stream.py `
   --require-gpu
 ```
 
-Then try `--recognition-fps 6` if the GPU latency remains low. `--recognition-fps` controls SCRFD detection/tracking cycles; `--max-embeddings-per-cycle` controls the ArcFace budget and defaults to `1`. Use `--require-gpu` when the session must use CUDA and should exit immediately if either SCRFD or ArcFace falls back to CPU.
+Then try `--recognition-fps 6` if the GPU latency remains low. `--recognition-fps` controls SCRFD detection/tracking cycles; `--max-embeddings-per-cycle` controls the ArcFace budget and defaults to `1`. Use `--require-gpu` when the session must use the platform accelerator (CUDA on Windows, CoreML on macOS) and should exit immediately if either SCRFD or ArcFace falls back to CPU.
 
 Watch GPU usage from a third terminal:
 
@@ -359,7 +402,7 @@ python recognize_stream.py `
   --snapshot-dir outputs/snapshots
 ```
 
-On macOS, use `python app.py` for detection. `recognize_stream.py` exits with a clear Windows-only message.
+On Linux or other unsupported hosts, `recognize_stream.py` exits with a clear platform error before loading the recognition stack; use `python app.py` for detection there.
 
 ## MQTT Control Plane and Audit Logging
 
@@ -441,7 +484,7 @@ python stream_server.py \
   --mqtt-password-env AIOT_MQTT_PASSWORD
 ```
 
-On the **Windows AMD64 cloud laptop**, run this in PowerShell to recognize the edge RTSP stream:
+On the **cloud laptop**, recognize the edge RTSP stream — PowerShell on Windows AMD64, Bash on macOS Apple Silicon; the flags are identical. Add `--require-gpu` to fail fast when the platform accelerator (CUDA or CoreML) is not active:
 
 ```powershell
 $env:AIOT_MQTT_PASSWORD='<recognition-password>'
@@ -507,7 +550,7 @@ python scripts/run_edge_agent.py --device /dev/video0 --mqtt-host <BROKER_LAN_IP
 
 The agent owns the MQTT connection and keeps running while the fixed publisher child is stopped. Its state machine is `offline -> starting -> streaming -> stopping -> stopped`, with `error` entered when the child exits unexpectedly; `start` and `restart` recover from `stopped` or `error`. In `--motion-triggered` mode, the supervised child remains alive as the motion monitor while the camera publisher is started and stopped by the existing session policy. Status payloads include `mode`, child liveness, and RTSP TCP health.
 
-Enable recognition result publishing from **Windows AMD64 PowerShell**:
+Enable recognition result publishing from the cloud laptop (PowerShell on Windows AMD64; the same flags work from Bash on macOS Apple Silicon):
 
 ```powershell
 $env:AIOT_MQTT_PASSWORD='recognition-secret'
@@ -585,5 +628,8 @@ Open `http://127.0.0.1:8080`. The page connects to MediaMTX WebRTC (`http://127.
 - `MediaMTX did not start`: port `8554` is likely already in use.
 - `Could not open RTSP stream`: start module 1 first, then verify `rtsp://127.0.0.1:8554/camera`.
 - `Could not find video device with name [1. Integrated Camera]`: pass the exact device name without the menu number, for example `--device "Integrated Camera"`.
-- `GPU requested but unavailable, using CPU`: verify the NVIDIA driver, CUDA/cuDNN runtime DLLs, and the ONNX Runtime CUDA session test in the Windows recognition setup section.
+- `CUDAExecutionProvider requested but unavailable, using CPU`: verify the NVIDIA driver, CUDA/cuDNN runtime DLLs, and the ONNX Runtime CUDA session test in the Windows recognition setup section.
+- `CoreMLExecutionProvider requested but unavailable, using CPU`: verify macOS 14+ on Apple Silicon, the official ONNX Runtime wheel from `requirements-recognition-macos.txt`, and `CoreMLExecutionProvider` in `ort.get_available_providers()`; see the macOS recognition setup section. A CoreML-bound session may still run individual operators on the CPU through `MLComputeUnits=ALL`; that is by design, not a fallback.
+- Recognition reports `CPU only` on macOS: `CoreMLExecutionProvider` is missing from `ort.get_available_providers()`, so the environment is broken — verify macOS 14+ on Apple Silicon, the official ONNX Runtime wheel from `requirements-recognition-macos.txt`, and no competing ONNX Runtime packages; see the macOS recognition setup section. With `--require-gpu` the process exits with `Error: --require-gpu was set but CoreMLExecutionProvider is not active.`
+- `CoreMLExecutionProvider requested but unavailable, using CPU`: CoreML is available in ONNX Runtime, but at least one model session (SCRFD or ArcFace) bound only the CPU provider; check `FaceEngine.provider_status.warning` for the ONNX Runtime output and rerun with `--require-gpu` for the fail-fast exit. First-run model compilation never changes `gpu_active` after `FaceEngine` construction.
 - For RTSP URLs or MQTT credentials, avoid placing secrets in shared shell history or screenshots. Application logs redact RTSP passwords, and MQTT passwords should be passed through `--mqtt-password-env`.
