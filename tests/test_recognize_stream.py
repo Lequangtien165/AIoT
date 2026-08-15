@@ -1,5 +1,8 @@
 import unittest
+import io
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +11,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from aiot.recognition.face_engine import FaceDetection, FaceEmbedding
+from aiot.recognition.runtime import get_recognition_runtime
 from aiot.recognition.wanted import WantedList
 from aiot.tracking.face_tracker import TrackAssignment
 from recognize_stream import (
@@ -18,6 +22,7 @@ from recognize_stream import (
     RecognitionWorker,
     StreamFrame,
     handle_result_events,
+    main,
     matched_track_color,
     parse_args,
     render_recognition_result,
@@ -81,6 +86,131 @@ class ParseArgsTests(unittest.TestCase):
     def test_mqtt_username_requires_password_env(self):
         with self.assertRaises(SystemExit):
             parse_args()
+
+
+class MainGateTests(unittest.TestCase):
+    def test_help_mentions_cuda_and_coreml(self):
+        stdout = io.StringIO()
+        with patch("sys.argv", ["recognize_stream.py", "--help"]), patch(
+            "sys.stdout", stdout
+        ), self.assertRaises(SystemExit) as context:
+            parse_args()
+
+        self.assertEqual(context.exception.code, 0)
+        self.assertIn("CUDA", stdout.getvalue())
+        self.assertIn("CoreML", stdout.getvalue())
+
+    @patch(
+        "recognize_stream.get_recognition_runtime",
+        side_effect=RuntimeError("Unsupported platform for recognition: Linux x86_64."),
+    )
+    def test_main_rejects_unsupported_runtime_before_engine_init(self, mock_runtime):
+        stderr = io.StringIO()
+        with patch("sys.argv", ["recognize_stream.py"]), patch("sys.stderr", stderr), patch(
+            "aiot.recognition.face_engine.FaceEngine"
+        ) as engine_class:
+            result = main()
+
+        self.assertEqual(result, 1)
+        engine_class.assert_not_called()
+        self.assertIn("Unsupported platform for recognition: Linux x86_64.", stderr.getvalue())
+        self.assertNotIn("Windows only", stderr.getvalue())
+
+    def test_main_rejects_unsupported_runtime_without_heavy_imports(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, {root!r})\n"
+            "import recognize_stream\n"
+            "assert 'aiot.recognition.face_engine' not in sys.modules\n"
+            "assert 'aiot.recognition.face_recognizer' not in sys.modules\n"
+            "sys.argv = ['recognize_stream.py']\n"
+            "from unittest.mock import patch\n"
+            "with patch('recognize_stream.get_recognition_runtime', "
+            "side_effect=RuntimeError('Unsupported platform for recognition: Linux x86_64.')):\n"
+            "    result = recognize_stream.main()\n"
+            "assert result == 1, result\n"
+            "assert 'aiot.recognition.face_engine' not in sys.modules\n"
+            "assert 'aiot.recognition.face_recognizer' not in sys.modules\n"
+            "print('OK')\n"
+        ).format(root=str(repo_root))
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("OK", completed.stdout)
+
+
+class _FakeRecognitionEngine:
+    def __init__(self, accelerator_provider, gpu_requested, gpu_active):
+        self.accelerator_provider = accelerator_provider
+        self.detector_providers = [accelerator_provider, "CPUExecutionProvider"]
+        self.recognition_providers = [accelerator_provider, "CPUExecutionProvider"]
+        self.startup_output = ""
+        self.provider_status = SimpleNamespace(
+            gpu_requested=gpu_requested,
+            gpu_active=gpu_active,
+            warning=None,
+        )
+
+
+class RequireGpuGateTests(unittest.TestCase):
+    def _run_main(self, engine, runtime):
+        stderr = io.StringIO()
+        with patch("sys.argv", ["recognize_stream.py", "--require-gpu"]), patch(
+            "sys.stderr", stderr
+        ), patch(
+            "aiot.recognition.face_engine.FaceEngine", return_value=engine
+        ) as engine_class, patch(
+            "recognize_stream.get_recognition_runtime", return_value=runtime
+        ):
+            result = main()
+        return result, stderr.getvalue(), engine_class
+
+    def test_require_gpu_fails_fast_when_cuda_inactive(self):
+        runtime = get_recognition_runtime("Windows", "AMD64")
+        engine = _FakeRecognitionEngine("CUDAExecutionProvider", gpu_requested=True, gpu_active=False)
+
+        result, stderr, engine_class = self._run_main(engine, runtime)
+
+        self.assertEqual(result, 1)
+        self.assertIn("CUDAExecutionProvider is not active", stderr)
+        engine_class.assert_called_once_with(det_size=640, runtime=runtime)
+
+    def test_require_gpu_fails_fast_when_coreml_inactive(self):
+        runtime = get_recognition_runtime("Darwin", "arm64")
+        engine = _FakeRecognitionEngine("CoreMLExecutionProvider", gpu_requested=True, gpu_active=False)
+
+        result, stderr, engine_class = self._run_main(engine, runtime)
+
+        self.assertEqual(result, 1)
+        self.assertIn("CoreMLExecutionProvider is not active", stderr)
+        engine_class.assert_called_once_with(det_size=640, runtime=runtime)
+
+    def test_require_gpu_passes_when_accelerator_active(self):
+        runtime = get_recognition_runtime("Windows", "AMD64")
+        engine = _FakeRecognitionEngine("CUDAExecutionProvider", gpu_requested=True, gpu_active=True)
+        with patch("sys.argv", ["recognize_stream.py", "--require-gpu"]), patch(
+            "aiot.recognition.face_engine.FaceEngine", return_value=engine
+        ) as engine_class, patch(
+            "recognize_stream.get_recognition_runtime", return_value=runtime
+        ), patch("aiot.recognition.wanted.WantedList"), patch(
+            "recognize_stream.connect_mqtt_client", return_value=None
+        ), patch("aiot.recognition.face_recognizer.FaceRecognizer"), patch(
+            "aiot.tracking.face_tracker.FaceTracker"
+        ), patch("aiot.streaming.stream_output.StreamOutput"), patch(
+            "recognize_stream.LatestFrameReader"
+        ), patch("recognize_stream.RecognitionWorker"), patch(
+            "recognize_stream.run_display_loop", return_value=None
+        ), patch("recognize_stream.publish_mqtt"):
+            result = main()
+
+        self.assertEqual(result, 0)
+        engine_class.assert_called_once_with(det_size=640, runtime=runtime)
 
 
 class ScaleBBoxTests(unittest.TestCase):
