@@ -45,6 +45,20 @@ class CliReferenceTests(unittest.TestCase):
                 self.assertIsNotNone(parser)
                 self.assertTrue(parser._actions)
 
+    def test_curated_matrix_tracks_recognition_accelerators(self):
+        doc = DOC_PATH.read_text(encoding="utf-8")
+        curated = doc[doc.index(gen.AUTO_END) + len(gen.AUTO_END):]
+        rows = [line for line in curated.splitlines() if line.startswith("| Recognition ")]
+        self.assertEqual(len(rows), 2)
+        stream_row = next(line for line in rows if "recognize_stream.py" in line)
+        image_row = next(line for line in rows if "recognize_image.py" in line)
+        self.assertIn("yes (CUDA)", stream_row)
+        self.assertIn("CoreML, CPU fallback", stream_row)
+        self.assertTrue(stream_row.endswith("| no |"))
+        self.assertIn("yes (CUDA)", image_row)
+        self.assertIn("CoreML, pending validation", image_row)
+        self.assertTrue(image_row.endswith("| no |"))
+
 
 if __name__ == "__main__":
     unittest.main()
