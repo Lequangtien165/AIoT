@@ -1,9 +1,8 @@
-"""Recognize all faces from an RTSP stream on Windows."""
+"""Recognize all faces from an RTSP stream on Windows and macOS."""
 
 from __future__ import annotations
 
 import argparse
-import platform
 import sys
 import threading
 import time
@@ -29,6 +28,7 @@ from aiot.mqtt.topics import (
     system_status_topic,
     topic_policy,
 )
+from aiot.recognition.runtime import get_recognition_runtime
 from aiot.streaming.stream_reader import display_source, open_capture
 from aiot.streaming.stream_settings import RTSP_URL
 
@@ -79,7 +79,7 @@ class CloudEdgeSession:
         self.last_presence = 0.0
         self.capture_enabled = threading.Event()
 
-    def update(self, topic: str, payload: dict, _retained: bool) -> None:
+    def update(self, topic: str, payload: dict, retained: bool) -> None:
         if topic != system_status_topic(self.device_id):
             return
         if payload.get("schema_version") != payloads.SCHEMA_VERSION or payload.get("device_id") != self.device_id:
@@ -109,7 +109,7 @@ class CloudEdgeSession:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Recognize faces from an RTSP stream on Windows.")
+    parser = argparse.ArgumentParser(description="Recognize faces from an RTSP stream on Windows AMD64 (CUDA) and macOS Apple Silicon (CoreML).")
     parser.add_argument("--source", default=RTSP_URL, help=f"RTSP URL (default: {RTSP_URL}).")
     parser.add_argument("--threshold", type=float, default=0.45, help="Cosine similarity threshold (default: 0.45).")
     parser.add_argument("--top-k", type=int, default=5, help="Number of FAISS vectors to retrieve (default: 5).")
@@ -140,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print capture, display, and recognition profiling. Not the camera profile flag used by stream_server.py.",
     )
-    parser.add_argument("--require-gpu", action="store_true", help="Exit if CUDAExecutionProvider is not active.")
+    parser.add_argument("--require-gpu", action="store_true", help="Exit if the platform accelerator (CUDA on Windows, CoreML on macOS) is not active.")
     parser.add_argument("--reconnect-delay", type=float, default=2.0, help="Seconds between RTSP reconnect attempts (default: 2.0).")
     parser.add_argument("--mqtt-host", help="MQTT broker host for recognition/result events.")
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883).")
@@ -856,8 +856,11 @@ def connect_mqtt_client(args, edge_session) -> MqttClient | None:
 
 def main() -> int:
     args = parse_args()
-    if platform.system() != "Windows":
-        print("InsightFace + FAISS recognition is currently supported only on Windows. Use python app.py for detection.", file=sys.stderr)
+    try:
+        runtime = get_recognition_runtime()
+    except RuntimeError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        print("Use python app.py for MediaPipe detection only.", file=sys.stderr)
         return 1
 
     from aiot.recognition.face_engine import FaceEngine
@@ -865,6 +868,23 @@ def main() -> int:
     from aiot.recognition.wanted import WantedList
     from aiot.streaming.stream_output import StreamOutput
     from aiot.tracking.face_tracker import FaceTracker
+
+    engine = FaceEngine(det_size=args.det_size, runtime=runtime)
+    if engine.startup_output:
+        print(engine.startup_output, file=sys.stderr)
+    print(f"SCRFD providers: {', '.join(engine.detector_providers)}", file=sys.stderr)
+    print(f"ArcFace providers: {', '.join(engine.recognition_providers)}", file=sys.stderr)
+    if engine.provider_status.gpu_active:
+        print(f"{engine.accelerator_provider} active", file=sys.stderr)
+    elif engine.provider_status.gpu_requested:
+        print(f"{engine.accelerator_provider} requested but unavailable, using CPU", file=sys.stderr)
+        if engine.provider_status.warning:
+            print(f"[WARNING] {engine.provider_status.warning}", file=sys.stderr)
+    else:
+        print("CPU only", file=sys.stderr)
+    if args.require_gpu and not engine.provider_status.gpu_active:
+        print(f"Error: --require-gpu was set but {engine.accelerator_provider} is not active.", file=sys.stderr)
+        return 1
 
     args.wanted = WantedList(args.wanted_config)
 
@@ -876,7 +896,6 @@ def main() -> int:
         print(f"[MQTT] {error}", file=sys.stderr)
         return 1
 
-    engine = FaceEngine(det_size=args.det_size)
     recognizer = FaceRecognizer()
     tracker = FaceTracker(
         iou_threshold=args.track_iou_threshold,
@@ -886,21 +905,6 @@ def main() -> int:
         recognition_interval_frames=1,
         matched_recognition_interval_frames=args.matched_recognition_interval_frames,
     )
-    if engine.startup_output:
-        print(engine.startup_output, file=sys.stderr)
-    print(f"SCRFD providers: {', '.join(engine.detector_providers)}", file=sys.stderr)
-    print(f"ArcFace providers: {', '.join(engine.recognition_providers)}", file=sys.stderr)
-    if engine.provider_status.gpu_active:
-        print("GPU active", file=sys.stderr)
-    elif engine.provider_status.gpu_requested:
-        print("GPU requested but unavailable, using CPU", file=sys.stderr)
-        if engine.provider_status.warning:
-            print(f"[WARNING] {engine.provider_status.warning}", file=sys.stderr)
-    else:
-        print("CPU only", file=sys.stderr)
-    if args.require_gpu and not engine.provider_status.gpu_active:
-        print("Error: --require-gpu was set but CUDAExecutionProvider is not active.", file=sys.stderr)
-        return 1
 
     output = StreamOutput(args.record_video, args.snapshot_dir)
     reader = LatestFrameReader(
