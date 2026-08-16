@@ -58,6 +58,19 @@ PORTAL_SESSION_PATTERN = re.compile(r"^(?P<portal>[A-Z]+\d+[A-Z]+)_S(?P<session>
 SESSION_PATTERN = re.compile(r"^S(\d+)$")
 
 
+def resolve_output_dir(value: Path) -> Path:
+    """Resolve --output-dir to a directory inside the repository.
+
+    Relative values are anchored to the repository root and symlinks are
+    resolved so the writable output path can never escape the repository.
+    """
+    candidate = value if value.is_absolute() else PROJECT_ROOT / value
+    resolved = candidate.resolve()
+    if resolved == PROJECT_ROOT or not resolved.is_relative_to(PROJECT_ROOT):
+        raise ValueError(f"--output-dir must resolve inside the repository: {value}")
+    return resolved
+
+
 @dataclass(frozen=True)
 class Crop:
     path: Path
@@ -256,60 +269,85 @@ def collect_precheck_frames(
     return frames
 
 
-def run_precheck(
-    frames: Sequence[GroundTruthFrame],
+def _precheck_infer(
+    frame: GroundTruthFrame, engine: FaceEngine
+) -> tuple[np.ndarray | None, list[FaceDetection]]:
+    """Read one precheck frame and detect faces when the image is readable."""
+    image = cv2.imread(str(frame.image_path))
+    detections = engine.detect_faces(image) if image is not None else []
+    return image, detections
+
+
+def _precheck_empty_frame(
+    frame: GroundTruthFrame,
+    image: np.ndarray | None,
+    detections: list[FaceDetection],
+    empty_stats: dict[str, dict[str, int]],
+) -> None:
+    stats = empty_stats.setdefault(
+        frame.portal, {"frames": 0, "read_ok": 0, "with_detections": 0}
+    )
+    stats["frames"] += 1
+    if image is not None:
+        stats["read_ok"] += 1
+        if detections:
+            stats["with_detections"] += 1
+    print(
+        f"  {frame.sequence_name} {frame.frame_number:08d} empty "
+        f"read={'ok' if image is not None else 'fail'} "
+        f"detections={len(detections)}"
+    )
+
+
+def _count_embedded_matches(
+    image: np.ndarray,
+    matching,
+    detections: list[FaceDetection],
     engine: FaceEngine,
 ) -> int:
-    """Read, detect, match, and embed a small deterministic probe sample."""
-    print(f"precheck: {len(frames)} probe frames")
-    person_stats: dict[str, dict[str, int]] = {}
-    empty_stats: dict[str, dict[str, int]] = {}
-    for frame in frames:
-        image = cv2.imread(str(frame.image_path))
-        detections = engine.detect_faces(image) if image is not None else []
-        if frame.is_empty:
-            stats = empty_stats.setdefault(
-                frame.portal, {"frames": 0, "read_ok": 0, "with_detections": 0}
-            )
-            stats["frames"] += 1
-            if image is not None:
-                stats["read_ok"] += 1
-                if detections:
-                    stats["with_detections"] += 1
-            print(
-                f"  {frame.sequence_name} {frame.frame_number:08d} empty "
-                f"read={'ok' if image is not None else 'fail'} "
-                f"detections={len(detections)}"
-            )
-            continue
-        stats = person_stats.setdefault(
-            frame.portal,
-            {"frames": 0, "read_ok": 0, "detected": 0, "faces": 0, "matched": 0, "embedded": 0},
-        )
-        stats["frames"] += 1
-        if image is None:
-            print(
-                f"  {frame.sequence_name} {frame.frame_number:08d} person read=fail"
-            )
-            continue
-        stats["read_ok"] += 1
-        stats["faces"] += len(frame.persons)
-        matching = match_persons_to_detections(frame.persons, detections)
-        if detections:
-            stats["detected"] += 1
-        stats["matched"] += len(matching.matches)
-        embedded = 0
-        for match in matching.matches:
-            detection = detections[match.detection_index]
-            if engine.embed_detected_face(image, detection) is not None:
-                embedded += 1
-        stats["embedded"] += embedded
-        print(
-            f"  {frame.sequence_name} {frame.frame_number:08d} person "
-            f"read=ok detections={len(detections)} "
-            f"matched={len(matching.matches)} missed={len(matching.missed_persons)} "
-            f"embedded={embedded}"
-        )
+    embedded = 0
+    for match in matching.matches:
+        detection = detections[match.detection_index]
+        if engine.embed_detected_face(image, detection) is not None:
+            embedded += 1
+    return embedded
+
+
+def _precheck_person_frame(
+    frame: GroundTruthFrame,
+    image: np.ndarray | None,
+    detections: list[FaceDetection],
+    engine: FaceEngine,
+    person_stats: dict[str, dict[str, int]],
+) -> None:
+    stats = person_stats.setdefault(
+        frame.portal,
+        {"frames": 0, "read_ok": 0, "detected": 0, "faces": 0, "matched": 0, "embedded": 0},
+    )
+    stats["frames"] += 1
+    if image is None:
+        print(f"  {frame.sequence_name} {frame.frame_number:08d} person read=fail")
+        return
+    stats["read_ok"] += 1
+    stats["faces"] += len(frame.persons)
+    matching = match_persons_to_detections(frame.persons, detections)
+    if detections:
+        stats["detected"] += 1
+    stats["matched"] += len(matching.matches)
+    embedded = _count_embedded_matches(image, matching, detections, engine)
+    stats["embedded"] += embedded
+    print(
+        f"  {frame.sequence_name} {frame.frame_number:08d} person "
+        f"read=ok detections={len(detections)} "
+        f"matched={len(matching.matches)} missed={len(matching.missed_persons)} "
+        f"embedded={embedded}"
+    )
+
+
+def _report_precheck(
+    person_stats: dict[str, dict[str, int]],
+    empty_stats: dict[str, dict[str, int]],
+) -> None:
     for portal in sorted(person_stats):
         stats = person_stats[portal]
         frames_total = stats["frames"]
@@ -333,6 +371,23 @@ def run_precheck(
             f"  {portal} empty: {frames_total} frames, read {read_ok}/{frames_total} ok, "
             f"with detections {ratio}"
         )
+
+
+def run_precheck(
+    frames: Sequence[GroundTruthFrame],
+    engine: FaceEngine,
+) -> int:
+    """Read, detect, match, and embed a small deterministic probe sample."""
+    print(f"precheck: {len(frames)} probe frames")
+    person_stats: dict[str, dict[str, int]] = {}
+    empty_stats: dict[str, dict[str, int]] = {}
+    for frame in frames:
+        image, detections = _precheck_infer(frame, engine)
+        if frame.is_empty:
+            _precheck_empty_frame(frame, image, detections, empty_stats)
+        else:
+            _precheck_person_frame(frame, image, detections, engine, person_stats)
+    _report_precheck(person_stats, empty_stats)
     return 0
 
 
@@ -439,6 +494,304 @@ def _frame_inference(
     )
 
 
+class _EvaluationState:
+    """Accumulate recognition, detection, and per-partition counts for one run."""
+
+    def __init__(
+        self,
+        run_id: str,
+        gallery_portal: str,
+        gallery_session: str,
+        threshold: float,
+        gallery_identities: set[str],
+        gallery_vectors: int,
+        cache: object | None,
+    ) -> None:
+        self.run_id = run_id
+        self.gallery_portal = gallery_portal
+        self.gallery_session = gallery_session
+        self.threshold = threshold
+        self.gallery_identities = gallery_identities
+        self.gallery_vectors = gallery_vectors
+        self.probe_cache_id = cache.probe_cache_id if cache is not None else ""
+        self.predictions: list[dict] = []
+        self.search_times: list[float] = []
+        self.detection_times: list[float] = []
+        self.embedding_times: list[float] = []
+        self.counts: dict[str, int] = {
+            "correct": 0,
+            "false_reject": 0,
+            "misidentified": 0,
+            "not_enrolled": 0,
+            "false_accept": 0,
+            "probe_images": 0,
+            "closed_set": 0,
+        }
+        self.detection_counts: dict[str, int] = {
+            "gt_face_frames": 0,
+            "gt_faces": 0,
+            "matched_faces": 0,
+            "missed_faces": 0,
+            "total_detections": 0,
+            "spurious_detections": 0,
+            "empty_frames": 0,
+            "empty_frames_with_detections": 0,
+        }
+        self.per_partition: dict[str, dict] = {}
+
+    def update_counts(self, target: dict[str, int], outcome: str, score: float | None) -> None:
+        target["probe_images"] += 1
+        if outcome == "not_enrolled":
+            target["not_enrolled"] += 1
+            if score is not None and score >= self.threshold:
+                target["false_accept"] += 1
+        else:
+            target["closed_set"] += 1
+            target[outcome] += 1
+
+    def partition_entry(self, frame: GroundTruthFrame) -> dict:
+        key = f"{frame.portal}-{frame.session}-{frame.camera}"
+        scope = "same_portal_cross_session" if frame.portal == self.gallery_portal else "cross_portal"
+        return self.per_partition.setdefault(
+            key,
+            {
+                "probe_portal": frame.portal,
+                "probe_session": frame.session,
+                "camera": frame.camera,
+                "scope": scope,
+                "counts": dict.fromkeys(self.counts, 0),
+                "detection": dict.fromkeys(self.detection_counts, 0),
+            },
+        )
+
+    def record_prediction(
+        self,
+        frame: GroundTruthFrame,
+        identity: str,
+        outcome: str,
+        score: float | None,
+        predicted: str,
+        detection_status: str,
+        confidence: float | None,
+        bbox: tuple[int, int, int, int] | None,
+        detection_latency_ms: float | None,
+        embedding_status: str,
+        embedding_latency_ms: float | None,
+        inference_source: str = "live",
+        cache_entry_id: str | None = None,
+    ) -> None:
+        scope = "same_portal_cross_session" if frame.portal == self.gallery_portal else "cross_portal"
+        entry = self.partition_entry(frame)
+        rounded_score = round(score, 4) if score is not None else None
+        self.update_counts(self.counts, outcome, rounded_score)
+        self.update_counts(entry["counts"], outcome, rounded_score)
+        self.predictions.append(
+            {
+                "run_id": self.run_id,
+                "gallery_portal": self.gallery_portal,
+                "gallery_session": self.gallery_session,
+                "probe_portal": frame.portal,
+                "probe_session": frame.session,
+                "camera": frame.camera,
+                "sequence": frame.sequence_name,
+                "identity": identity,
+                "image_path": str(frame.image_path),
+                "predicted_identity": predicted,
+                "score": rounded_score,
+                "outcome": outcome,
+                "scope": scope,
+                "inference_source": inference_source,
+                "cache_entry_id": cache_entry_id,
+                "probe_cache_id": self.probe_cache_id,
+                "detection_status": detection_status,
+                "detection_confidence": round(confidence, 4) if confidence is not None else None,
+                "detection_bbox": ",".join(str(value) for value in bbox) if bbox is not None else None,
+                "detection_latency_ms": round(detection_latency_ms, 4) if detection_latency_ms is not None else None,
+                "embedding_status": embedding_status,
+                "embedding_latency_ms": round(embedding_latency_ms, 4) if embedding_latency_ms is not None else None,
+            }
+        )
+
+    def record_empty_frame(self, entry_detection: dict, inference: FrameInference) -> None:
+        self.detection_counts["empty_frames"] += 1
+        entry_detection["empty_frames"] += 1
+        if not inference.read_ok:
+            return
+        self.detection_times.append(inference.detection_latency_ms)
+        if inference.detections:
+            self.detection_counts["empty_frames_with_detections"] += 1
+            entry_detection["empty_frames_with_detections"] += 1
+            self.detection_counts["total_detections"] += len(inference.detections)
+            self.detection_counts["spurious_detections"] += len(inference.detections)
+            entry_detection["total_detections"] += len(inference.detections)
+            entry_detection["spurious_detections"] += len(inference.detections)
+
+    def record_gt_face_frame(self, entry_detection: dict, frame: GroundTruthFrame) -> None:
+        self.detection_counts["gt_face_frames"] += 1
+        entry_detection["gt_face_frames"] += 1
+        self.detection_counts["gt_faces"] += len(frame.persons)
+        entry_detection["gt_faces"] += len(frame.persons)
+
+    def record_read_error(self, entry_detection: dict, frame: GroundTruthFrame, inference: FrameInference) -> None:
+        self.detection_counts["missed_faces"] += len(frame.persons)
+        entry_detection["missed_faces"] += len(frame.persons)
+        for person in frame.persons:
+            outcome = _identity_outcome(person.identity, self.gallery_identities)
+            self.record_prediction(
+                frame, person.identity, outcome, None, "", "read_error", None, None, None,
+                "not_applicable", None, inference.source, inference.entry_id,
+            )
+
+    def finalize(self) -> tuple[list[dict], dict, dict]:
+        same_counts = dict.fromkeys(self.counts, 0)
+        cross_counts = dict.fromkeys(self.counts, 0)
+        for prediction in self.predictions:
+            target = same_counts if prediction["scope"] == "same_portal_cross_session" else cross_counts
+            self.update_counts(target, prediction["outcome"], prediction["score"])
+
+        accuracy, frr, misid = _closed_metrics(self.counts)
+        same_accuracy, _, _ = _closed_metrics(same_counts)
+        cross_accuracy, _, _ = _closed_metrics(cross_counts)
+        matched_faces = self.detection_counts["matched_faces"]
+        missed_faces = self.detection_counts["missed_faces"]
+        run_summary = {
+            "run_id": self.run_id,
+            "gallery_portal": self.gallery_portal,
+            "gallery_session": self.gallery_session,
+            "gallery_vectors": self.gallery_vectors,
+            "probe_images": self.counts["probe_images"],
+            "closed_set": self.counts["closed_set"],
+            "accuracy": round(accuracy, 4) if accuracy is not None else None,
+            "false_reject_rate": round(frr, 4) if frr is not None else None,
+            "misidentification_rate": round(misid, 4) if misid is not None else None,
+            "same_portal_accuracy": round(same_accuracy, 4) if same_accuracy is not None else None,
+            "cross_portal_accuracy": round(cross_accuracy, 4) if cross_accuracy is not None else None,
+            "same_correct": same_counts["correct"],
+            "same_closed_set": same_counts["closed_set"],
+            "cross_correct": cross_counts["correct"],
+            "cross_closed_set": cross_counts["closed_set"],
+            "not_enrolled": self.counts["not_enrolled"],
+            "false_accept_rate": round(self.counts["false_accept"] / self.counts["not_enrolled"], 4) if self.counts["not_enrolled"] else None,
+            "search_p50_ms": percentile(self.search_times, 0.5),
+            "search_p95_ms": percentile(self.search_times, 0.95),
+            "gt_face_frames": self.detection_counts["gt_face_frames"],
+            "gt_faces": self.detection_counts["gt_faces"],
+            "matched_faces": matched_faces,
+            "missed_faces": missed_faces,
+            "total_detections": self.detection_counts["total_detections"],
+            "spurious_detections": self.detection_counts["spurious_detections"],
+            "empty_frames": self.detection_counts["empty_frames"],
+            "empty_frames_with_detections": self.detection_counts["empty_frames_with_detections"],
+            "detection_recall": _ratio(matched_faces, matched_faces + missed_faces),
+            "detection_precision": _ratio(matched_faces, self.detection_counts["total_detections"]),
+            "empty_frame_fpr": _ratio(self.detection_counts["empty_frames_with_detections"], self.detection_counts["empty_frames"]),
+            "detection_p50_ms": percentile(self.detection_times, 0.5),
+            "detection_p95_ms": percentile(self.detection_times, 0.95),
+            "probe_embedding_p50_ms": percentile(self.embedding_times, 0.5),
+            "probe_embedding_p95_ms": percentile(self.embedding_times, 0.95),
+        }
+        return self.predictions, run_summary, self.per_partition
+
+
+def _identity_outcome(identity: str, gallery_identities: set[str]) -> str:
+    return "not_enrolled" if identity not in gallery_identities else "false_reject"
+
+
+def _classify_outcome(
+    identity: str,
+    gallery_identities: set[str],
+    score: float,
+    predicted: str,
+    threshold: float,
+) -> str:
+    if identity not in gallery_identities:
+        return "not_enrolled"
+    if score >= threshold and predicted == identity:
+        return "correct"
+    if score >= threshold:
+        return "misidentified"
+    return "false_reject"
+
+
+def _record_match(
+    state: _EvaluationState,
+    frame: GroundTruthFrame,
+    match,
+    detections: list[FaceDetection],
+    inference: FrameInference,
+    gallery: list[EmbeddingRecord],
+    index,
+    detection_latency_ms: float | None,
+) -> None:
+    detection = detections[match.detection_index]
+    embedding_latency_ms = inference.embedding_latency_ms[match.detection_index]
+    state.embedding_times.append(embedding_latency_ms)
+    face = inference.embeddings[match.detection_index]
+    if face is None:
+        outcome = _identity_outcome(match.identity, state.gallery_identities)
+        state.record_prediction(
+            frame, match.identity, outcome, None, "", "matched", detection.confidence,
+            detection.bbox, detection_latency_ms, "embed_error", embedding_latency_ms,
+            inference.source, inference.entry_id,
+        )
+        return
+    query = np.ascontiguousarray(face.reshape(1, -1), dtype="float32")
+    started = time.monotonic()
+    similarities, indices = index.search(query, 1)
+    state.search_times.append((time.monotonic() - started) * 1000.0)
+    predicted = gallery[indices[0][0]].identity if indices[0][0] >= 0 else ""
+    score = float(similarities[0][0])
+    outcome = _classify_outcome(
+        match.identity, state.gallery_identities, score, predicted, state.threshold
+    )
+    state.record_prediction(
+        frame, match.identity, outcome, score, predicted, "matched", detection.confidence,
+        detection.bbox, detection_latency_ms, "ok", embedding_latency_ms,
+        inference.source, inference.entry_id,
+    )
+
+
+def _record_missed(
+    state: _EvaluationState,
+    frame: GroundTruthFrame,
+    person,
+    inference: FrameInference,
+) -> None:
+    outcome = _identity_outcome(person.identity, state.gallery_identities)
+    state.record_prediction(
+        frame, person.identity, outcome, None, "", "missed", None, None,
+        inference.detection_latency_ms, "not_applicable", None,
+        inference.source, inference.entry_id,
+    )
+
+
+def _evaluate_frame(
+    frame: GroundTruthFrame,
+    entry_detection: dict,
+    inference: FrameInference,
+    state: _EvaluationState,
+    gallery: list[EmbeddingRecord],
+    index,
+) -> None:
+    detection_counts = state.detection_counts
+    detections = inference.detections
+    detection_latency_ms = inference.detection_latency_ms
+    state.detection_times.append(detection_latency_ms)
+    matching = match_persons_to_detections(frame.persons, detections)
+    detection_counts["total_detections"] += len(detections)
+    entry_detection["total_detections"] += len(detections)
+    detection_counts["matched_faces"] += len(matching.matches)
+    entry_detection["matched_faces"] += len(matching.matches)
+    detection_counts["missed_faces"] += len(matching.missed_persons)
+    entry_detection["missed_faces"] += len(matching.missed_persons)
+    detection_counts["spurious_detections"] += len(matching.spurious_detection_indices)
+    entry_detection["spurious_detections"] += len(matching.spurious_detection_indices)
+    for match in matching.matches:
+        _record_match(state, frame, match, detections, inference, gallery, index, detection_latency_ms)
+    for person in matching.missed_persons:
+        _record_missed(state, frame, person, inference)
+
+
 def run_evaluation(
     run_id: str,
     gallery_portal: str,
@@ -470,103 +823,9 @@ def run_evaluation(
     index = faiss.IndexFlatIP(matrix.shape[1])
     index.add(matrix)
 
-    predictions: list[dict] = []
-    search_times: list[float] = []
-    detection_times: list[float] = []
-    embedding_times: list[float] = []
-    counts: dict[str, int] = {
-        "correct": 0,
-        "false_reject": 0,
-        "misidentified": 0,
-        "not_enrolled": 0,
-        "false_accept": 0,
-        "probe_images": 0,
-        "closed_set": 0,
-    }
-    detection_counts: dict[str, int] = {
-        "gt_face_frames": 0,
-        "gt_faces": 0,
-        "matched_faces": 0,
-        "missed_faces": 0,
-        "total_detections": 0,
-        "spurious_detections": 0,
-        "empty_frames": 0,
-        "empty_frames_with_detections": 0,
-    }
-    per_partition: dict[str, dict] = {}
-
-    def update_counts(target: dict[str, int], outcome: str, score: float | None) -> None:
-        target["probe_images"] += 1
-        if outcome == "not_enrolled":
-            target["not_enrolled"] += 1
-            if score is not None and score >= threshold:
-                target["false_accept"] += 1
-        else:
-            target["closed_set"] += 1
-            target[outcome] += 1
-
-    def partition_entry(frame: GroundTruthFrame) -> dict:
-        key = f"{frame.portal}-{frame.session}-{frame.camera}"
-        scope = "same_portal_cross_session" if frame.portal == gallery_portal else "cross_portal"
-        return per_partition.setdefault(
-            key,
-            {
-                "probe_portal": frame.portal,
-                "probe_session": frame.session,
-                "camera": frame.camera,
-                "scope": scope,
-                "counts": {k: 0 for k in counts},
-                "detection": {k: 0 for k in detection_counts},
-            },
-        )
-
-    def record_prediction(
-        frame: GroundTruthFrame,
-        identity: str,
-        outcome: str,
-        score: float | None,
-        predicted: str,
-        detection_status: str,
-        confidence: float | None,
-        bbox: tuple[int, int, int, int] | None,
-        detection_latency_ms: float | None,
-        embedding_status: str,
-        embedding_latency_ms: float | None,
-        inference_source: str = "live",
-        cache_entry_id: str | None = None,
-    ) -> None:
-        scope = "same_portal_cross_session" if frame.portal == gallery_portal else "cross_portal"
-        entry = partition_entry(frame)
-        rounded_score = round(score, 4) if score is not None else None
-        update_counts(counts, outcome, rounded_score)
-        update_counts(entry["counts"], outcome, rounded_score)
-        predictions.append(
-            {
-                "run_id": run_id,
-                "gallery_portal": gallery_portal,
-                "gallery_session": gallery_session,
-                "probe_portal": frame.portal,
-                "probe_session": frame.session,
-                "camera": frame.camera,
-                "sequence": frame.sequence_name,
-                "identity": identity,
-                "image_path": str(frame.image_path),
-                "predicted_identity": predicted,
-                "score": rounded_score,
-                "outcome": outcome,
-                "scope": scope,
-                "inference_source": inference_source,
-                "cache_entry_id": cache_entry_id,
-                "probe_cache_id": cache.probe_cache_id if cache is not None else "",
-                "detection_status": detection_status,
-                "detection_confidence": round(confidence, 4) if confidence is not None else None,
-                "detection_bbox": ",".join(str(value) for value in bbox) if bbox is not None else None,
-                "detection_latency_ms": round(detection_latency_ms, 4) if detection_latency_ms is not None else None,
-                "embedding_status": embedding_status,
-                "embedding_latency_ms": round(embedding_latency_ms, 4) if embedding_latency_ms is not None else None,
-            }
-        )
-
+    state = _EvaluationState(
+        run_id, gallery_portal, gallery_session, threshold, gallery_identities, len(gallery), cache
+    )
     started = time.monotonic()
     for frame_index, frame in enumerate(probe_frames, start=1):
         if frame_index % 5000 == 0:
@@ -574,127 +833,17 @@ def run_evaluation(
                 f"  {run_id}: {frame_index}/{len(probe_frames)} frames "
                 f"({time.monotonic() - started:.0f}s)"
             )
-        entry = partition_entry(frame)
-        entry_detection = entry["detection"]
+        entry_detection = state.partition_entry(frame)["detection"]
         inference = _frame_inference(frame, engine, cache, cache_stats)
         if frame.is_empty:
-            detection_counts["empty_frames"] += 1
-            entry_detection["empty_frames"] += 1
-            if not inference.read_ok:
-                continue
-            detection_times.append(inference.detection_latency_ms)
-            if inference.detections:
-                detection_counts["empty_frames_with_detections"] += 1
-                entry_detection["empty_frames_with_detections"] += 1
-                detection_counts["total_detections"] += len(inference.detections)
-                detection_counts["spurious_detections"] += len(inference.detections)
-                entry_detection["total_detections"] += len(inference.detections)
-                entry_detection["spurious_detections"] += len(inference.detections)
+            state.record_empty_frame(entry_detection, inference)
             continue
-
-        detection_counts["gt_face_frames"] += 1
-        entry_detection["gt_face_frames"] += 1
-        detection_counts["gt_faces"] += len(frame.persons)
-        entry_detection["gt_faces"] += len(frame.persons)
-
+        state.record_gt_face_frame(entry_detection, frame)
         if not inference.read_ok:
-            detection_counts["missed_faces"] += len(frame.persons)
-            entry_detection["missed_faces"] += len(frame.persons)
-            for person in frame.persons:
-                outcome = "not_enrolled" if person.identity not in gallery_identities else "false_reject"
-                record_prediction(frame, person.identity, outcome, None, "", "read_error", None, None, None, "not_applicable", None, inference.source, inference.entry_id)
+            state.record_read_error(entry_detection, frame, inference)
             continue
-
-        detections = inference.detections
-        detection_latency_ms = inference.detection_latency_ms
-        detection_times.append(detection_latency_ms)
-        matching = match_persons_to_detections(frame.persons, detections)
-        detection_counts["total_detections"] += len(detections)
-        entry_detection["total_detections"] += len(detections)
-        detection_counts["matched_faces"] += len(matching.matches)
-        entry_detection["matched_faces"] += len(matching.matches)
-        detection_counts["missed_faces"] += len(matching.missed_persons)
-        entry_detection["missed_faces"] += len(matching.missed_persons)
-        detection_counts["spurious_detections"] += len(matching.spurious_detection_indices)
-        entry_detection["spurious_detections"] += len(matching.spurious_detection_indices)
-
-        for match in matching.matches:
-            detection = detections[match.detection_index]
-            embedding_latency_ms = inference.embedding_latency_ms[match.detection_index]
-            embedding_times.append(embedding_latency_ms)
-            face = inference.embeddings[match.detection_index]
-            if face is None:
-                outcome = "not_enrolled" if match.identity not in gallery_identities else "false_reject"
-                record_prediction(frame, match.identity, outcome, None, "", "matched", detection.confidence, detection.bbox, detection_latency_ms, "embed_error", embedding_latency_ms, inference.source, inference.entry_id)
-                continue
-            query = np.ascontiguousarray(face.reshape(1, -1), dtype="float32")
-            started = time.monotonic()
-            similarities, indices = index.search(query, 1)
-            search_times.append((time.monotonic() - started) * 1000.0)
-            predicted = gallery[indices[0][0]].identity if indices[0][0] >= 0 else ""
-            score = float(similarities[0][0])
-            if match.identity not in gallery_identities:
-                outcome = "not_enrolled"
-            elif score >= threshold and predicted == match.identity:
-                outcome = "correct"
-            elif score >= threshold:
-                outcome = "misidentified"
-            else:
-                outcome = "false_reject"
-            record_prediction(frame, match.identity, outcome, score, predicted, "matched", detection.confidence, detection.bbox, detection_latency_ms, "ok", embedding_latency_ms, inference.source, inference.entry_id)
-
-        for person in matching.missed_persons:
-            outcome = "not_enrolled" if person.identity not in gallery_identities else "false_reject"
-            record_prediction(frame, person.identity, outcome, None, "", "missed", None, None, detection_latency_ms, "not_applicable", None, inference.source, inference.entry_id)
-
-    same_counts = {key: 0 for key in counts}
-    cross_counts = {key: 0 for key in counts}
-    for prediction in predictions:
-        target = same_counts if prediction["scope"] == "same_portal_cross_session" else cross_counts
-        update_counts(target, prediction["outcome"], prediction["score"])
-
-    accuracy, frr, misid = _closed_metrics(counts)
-    same_accuracy, _, _ = _closed_metrics(same_counts)
-    cross_accuracy, _, _ = _closed_metrics(cross_counts)
-    matched_faces = detection_counts["matched_faces"]
-    missed_faces = detection_counts["missed_faces"]
-    run_summary = {
-        "run_id": run_id,
-        "gallery_portal": gallery_portal,
-        "gallery_session": gallery_session,
-        "gallery_vectors": len(gallery),
-        "probe_images": counts["probe_images"],
-        "closed_set": counts["closed_set"],
-        "accuracy": round(accuracy, 4) if accuracy is not None else None,
-        "false_reject_rate": round(frr, 4) if frr is not None else None,
-        "misidentification_rate": round(misid, 4) if misid is not None else None,
-        "same_portal_accuracy": round(same_accuracy, 4) if same_accuracy is not None else None,
-        "cross_portal_accuracy": round(cross_accuracy, 4) if cross_accuracy is not None else None,
-        "same_correct": same_counts["correct"],
-        "same_closed_set": same_counts["closed_set"],
-        "cross_correct": cross_counts["correct"],
-        "cross_closed_set": cross_counts["closed_set"],
-        "not_enrolled": counts["not_enrolled"],
-        "false_accept_rate": round(counts["false_accept"] / counts["not_enrolled"], 4) if counts["not_enrolled"] else None,
-        "search_p50_ms": percentile(search_times, 0.5),
-        "search_p95_ms": percentile(search_times, 0.95),
-        "gt_face_frames": detection_counts["gt_face_frames"],
-        "gt_faces": detection_counts["gt_faces"],
-        "matched_faces": matched_faces,
-        "missed_faces": missed_faces,
-        "total_detections": detection_counts["total_detections"],
-        "spurious_detections": detection_counts["spurious_detections"],
-        "empty_frames": detection_counts["empty_frames"],
-        "empty_frames_with_detections": detection_counts["empty_frames_with_detections"],
-        "detection_recall": _ratio(matched_faces, matched_faces + missed_faces),
-        "detection_precision": _ratio(matched_faces, detection_counts["total_detections"]),
-        "empty_frame_fpr": _ratio(detection_counts["empty_frames_with_detections"], detection_counts["empty_frames"]),
-        "detection_p50_ms": percentile(detection_times, 0.5),
-        "detection_p95_ms": percentile(detection_times, 0.95),
-        "probe_embedding_p50_ms": percentile(embedding_times, 0.5),
-        "probe_embedding_p95_ms": percentile(embedding_times, 0.95),
-    }
-    return predictions, run_summary, per_partition
+        _evaluate_frame(frame, entry_detection, inference, state, gallery, index)
+    return state.finalize()
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -790,22 +939,7 @@ def _overall_summary(
     return summary
 
 
-def main() -> int:
-    args = parse_args()
-    crops = discover_crops(args.chokepoint_dir)
-    if not crops:
-        raise SystemExit("No PGM crops were found under the ChokePoint portal directories.")
-    sequences = discover_sequences(args.chokepoint_dir)
-    if not sequences:
-        raise SystemExit(
-            "No ground-truth XML files were found under the ChokePoint groundtruth directories."
-        )
-
-    if args.precheck > 0:
-        engine = FaceEngine(det_size=args.det_size, det_thresh=args.det_thresh)
-        frames = collect_precheck_frames(sequences, args.precheck)
-        return run_precheck(frames, engine)
-
+def _discover_partitions(crops: list[Crop]) -> list[tuple[str, str]]:
     partitions: list[tuple[str, str]] = []
     for portal in sorted({crop.portal for crop in crops}):
         for session in sorted(
@@ -813,10 +947,18 @@ def main() -> int:
             key=lambda s: int(SESSION_PATTERN.fullmatch(s).group(1)),
         ):
             partitions.append((portal, session))
+    return partitions
 
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if args.no_cache:
+
+def _prepare_gallery_records(
+    output_dir: Path,
+    crops: list[Crop],
+    engine: FaceEngine,
+    template_fill: float,
+    no_cache: bool,
+) -> list[EmbeddingRecord]:
+    """Load or embed the gallery crops, writing the embedding cache when needed."""
+    if no_cache:
         records: list[EmbeddingRecord] = []
     else:
         records, cache_existed = load_cache(output_dir, crops)
@@ -824,31 +966,38 @@ def main() -> int:
             records = []
     known = {record.path for record in records}
     missing = [crop for crop in crops if crop.path.as_posix() not in known]
-    engine = FaceEngine(det_size=args.det_size, det_thresh=args.det_thresh)
-    if missing:
-        records = records + [
-            EmbeddingRecord(
-                path=str(crop.path),
-                portal=crop.portal,
-                session=crop.session,
-                camera=crop.camera,
-                identity=crop.identity,
-            )
-            for crop in missing
-        ]
-        if not args.no_cache and known:
-            print(f"cache: {len(records) - len(missing)} cached, {len(missing)} new crops to embed")
-        started = time.monotonic()
-        embed_all(engine, records, args.template_fill)
-        embed_seconds = time.monotonic() - started
-        ok_count = sum(1 for r in records if r.status == "ok")
-        if embed_seconds:
-            print(f"embedding: {ok_count}/{len(records)} ok in {embed_seconds:.1f}s ({ok_count / embed_seconds:.1f} embeddings/s)")
-        save_cache(output_dir, records)
-    else:
+    if not missing:
         print(f"cache: all {len(records)} crops loaded from cache")
+        return records
+    records = records + [
+        EmbeddingRecord(
+            path=str(crop.path),
+            portal=crop.portal,
+            session=crop.session,
+            camera=crop.camera,
+            identity=crop.identity,
+        )
+        for crop in missing
+    ]
+    if not no_cache and known:
+        print(f"cache: {len(records) - len(missing)} cached, {len(missing)} new crops to embed")
+    started = time.monotonic()
+    embed_all(engine, records, template_fill)
+    embed_seconds = time.monotonic() - started
+    ok_count = sum(1 for r in records if r.status == "ok")
+    if embed_seconds:
+        print(f"embedding: {ok_count}/{len(records)} ok in {embed_seconds:.1f}s ({ok_count / embed_seconds:.1f} embeddings/s)")
+    save_cache(output_dir, records)
+    return records
 
-    probe_cache = None
+
+def _prepare_probe_cache(
+    args: argparse.Namespace,
+    engine: FaceEngine,
+    output_dir: Path,
+    sequences: Sequence[ChokepointSequence],
+) -> tuple[object, dict]:
+    """Load, build, or rebuild the probe inference cache for this configuration."""
     cache_stats: dict = {
         "hits": 0,
         "misses": 0,
@@ -867,17 +1016,126 @@ def main() -> int:
             f"probe cache: read {len(probe_cache)} entries, "
             f"id={probe_cache.probe_cache_id}, build={probe_cache.build_seconds:.0f}s"
         )
+        return probe_cache, cache_stats
     except ProbeCacheNotFound as error:
         if args.probe_cache == "read":
             raise SystemExit(f"{error}; run with --probe-cache build first.") from None
         print(f"probe cache: not found, building ({error})")
-        probe_cache = build_cache(probe_cache_dir, sequences, engine, fingerprint)
+        return build_cache(probe_cache_dir, sequences, engine, fingerprint), cache_stats
     except ProbeCacheStale as error:
         cache_stats["stale"] = 1
         if args.probe_cache == "read":
             raise SystemExit(f"{error}; rebuild with --probe-cache build.") from None
         print(f"probe cache: stale, rebuilding ({error})")
-        probe_cache = build_cache(probe_cache_dir, sequences, engine, fingerprint)
+        return build_cache(probe_cache_dir, sequences, engine, fingerprint), cache_stats
+
+
+def _run_partition(
+    args: argparse.Namespace,
+    run_id: str,
+    gallery_portal: str,
+    gallery_session: str,
+    sequences: Sequence[ChokepointSequence],
+    records: list[EmbeddingRecord],
+    engine: FaceEngine,
+    probe_cache: object | None,
+    cache_stats: dict,
+) -> tuple[list[dict], dict, dict]:
+    """Evaluate one gallery partition against every other partition's frames."""
+    probe_frames = collect_probes(sequences, gallery_portal, gallery_session, args.limit)
+    hits_before = cache_stats["hits"]
+    misses_before = cache_stats["misses"]
+    lookups_before = len(cache_stats["lookup_times"])
+    started = time.monotonic()
+    predictions, run_summary, per_partition = run_evaluation(
+        run_id, gallery_portal, gallery_session, records, probe_frames, engine, args.threshold,
+        cache=probe_cache, cache_stats=cache_stats,
+    )
+    run_summary["wall_seconds"] = round(time.monotonic() - started, 2)
+    if probe_cache is not None:
+        run_summary["probe_cache_hits"] = cache_stats["hits"] - hits_before
+        run_summary["probe_cache_misses"] = cache_stats["misses"] - misses_before
+        run_lookup_times = cache_stats["lookup_times"][lookups_before:]
+        run_summary["cache_lookup_p50_ms"] = percentile(run_lookup_times, 0.5)
+        run_summary["cache_lookup_p95_ms"] = percentile(run_lookup_times, 0.95)
+    print(
+        f"{run_id}: gallery={run_summary['gallery_vectors']} vectors, "
+        f"probes={run_summary['probe_images']}, "
+        f"accuracy={run_summary['accuracy']}, "
+        f"same={run_summary['same_portal_accuracy']}, "
+        f"cross={run_summary['cross_portal_accuracy']}, "
+        f"det_recall={run_summary['detection_recall']}"
+    )
+    return predictions, run_summary, per_partition
+
+
+def _camera_rows(
+    run_id: str,
+    gallery_portal: str,
+    gallery_session: str,
+    per_partition: dict,
+) -> list[dict]:
+    rows: list[dict] = []
+    for key, entry in sorted(per_partition.items()):
+        rows.append(
+            {
+                "run_id": run_id,
+                "gallery_portal": gallery_portal,
+                "gallery_session": gallery_session,
+                "probe_portal": entry["probe_portal"],
+                "probe_session": entry["probe_session"],
+                "camera": entry["camera"],
+                "scope": entry["scope"],
+                **entry["counts"],
+                **entry["detection"],
+            }
+        )
+    return rows
+
+
+def _write_outputs(
+    output_dir: Path,
+    records: list[EmbeddingRecord],
+    all_predictions: list[dict],
+    run_rows: list[dict],
+    camera_rows: list[dict],
+    overall: dict,
+) -> None:
+    write_csv(output_dir / "embedding_manifest.csv", [
+        {"path": r.path, "portal": r.portal, "session": r.session, "camera": r.camera, "identity": r.identity, "status": r.status, "reason": r.reason, "latency_ms": r.latency_ms}
+        for r in records
+    ])
+    write_csv(output_dir / "predictions.csv", all_predictions)
+    write_csv(output_dir / "run_summary.csv", run_rows)
+    write_csv(output_dir / "session_camera_summary.csv", camera_rows)
+    write_csv(output_dir / "overall_summary.csv", [overall])
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        output_dir = resolve_output_dir(args.output_dir)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    crops = discover_crops(args.chokepoint_dir)
+    if not crops:
+        raise SystemExit("No PGM crops were found under the ChokePoint portal directories.")
+    sequences = discover_sequences(args.chokepoint_dir)
+    if not sequences:
+        raise SystemExit(
+            "No ground-truth XML files were found under the ChokePoint groundtruth directories."
+        )
+
+    if args.precheck > 0:
+        engine = FaceEngine(det_size=args.det_size, det_thresh=args.det_thresh)
+        frames = collect_precheck_frames(sequences, args.precheck)
+        return run_precheck(frames, engine)
+
+    partitions = _discover_partitions(crops)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    engine = FaceEngine(det_size=args.det_size, det_thresh=args.det_thresh)
+    records = _prepare_gallery_records(output_dir, crops, engine, args.template_fill, args.no_cache)
+    probe_cache, cache_stats = _prepare_probe_cache(args, engine, output_dir, sequences)
     cache_stats["probe_cache_id"] = probe_cache.probe_cache_id
     cache_stats["build_seconds"] = probe_cache.build_seconds
     if args.probe_cache == "build":
@@ -893,60 +1151,19 @@ def main() -> int:
         run_id = f"run-{gallery_portal.lower()}-s{gallery_session[1:]}"
         if args.run and run_id != args.run:
             continue
-        probe_frames = collect_probes(sequences, gallery_portal, gallery_session, args.limit)
-        hits_before = cache_stats["hits"]
-        misses_before = cache_stats["misses"]
-        lookups_before = len(cache_stats["lookup_times"])
-        started = time.monotonic()
-        predictions, run_summary, per_partition = run_evaluation(
-            run_id, gallery_portal, gallery_session, records, probe_frames, engine, args.threshold,
-            cache=probe_cache, cache_stats=cache_stats,
+        predictions, run_summary, per_partition = _run_partition(
+            args, run_id, gallery_portal, gallery_session, sequences, records, engine,
+            probe_cache, cache_stats,
         )
-        run_summary["wall_seconds"] = round(time.monotonic() - started, 2)
-        if probe_cache is not None:
-            run_summary["probe_cache_hits"] = cache_stats["hits"] - hits_before
-            run_summary["probe_cache_misses"] = cache_stats["misses"] - misses_before
-            run_lookup_times = cache_stats["lookup_times"][lookups_before:]
-            run_summary["cache_lookup_p50_ms"] = percentile(run_lookup_times, 0.5)
-            run_summary["cache_lookup_p95_ms"] = percentile(run_lookup_times, 0.95)
         all_predictions.extend(predictions)
         run_rows.append(run_summary)
-        for key, entry in sorted(per_partition.items()):
-            camera_rows.append(
-                {
-                    "run_id": run_id,
-                    "gallery_portal": gallery_portal,
-                    "gallery_session": gallery_session,
-                    "probe_portal": entry["probe_portal"],
-                    "probe_session": entry["probe_session"],
-                    "camera": entry["camera"],
-                    "scope": entry["scope"],
-                    **entry["counts"],
-                    **entry["detection"],
-                }
-            )
-        print(
-            f"{run_id}: gallery={run_summary['gallery_vectors']} vectors, "
-            f"probes={run_summary['probe_images']}, "
-            f"accuracy={run_summary['accuracy']}, "
-            f"same={run_summary['same_portal_accuracy']}, "
-            f"cross={run_summary['cross_portal_accuracy']}, "
-            f"det_recall={run_summary['detection_recall']}"
-        )
+        camera_rows.extend(_camera_rows(run_id, gallery_portal, gallery_session, per_partition))
 
     if args.run and not run_rows:
         raise SystemExit(f"No partition matched --run {args.run}.")
 
     overall = _overall_summary(run_rows, records, cache_stats if probe_cache is not None else None)
-
-    write_csv(output_dir / "embedding_manifest.csv", [
-        {"path": r.path, "portal": r.portal, "session": r.session, "camera": r.camera, "identity": r.identity, "status": r.status, "reason": r.reason, "latency_ms": r.latency_ms}
-        for r in records
-    ])
-    write_csv(output_dir / "predictions.csv", all_predictions)
-    write_csv(output_dir / "run_summary.csv", run_rows)
-    write_csv(output_dir / "session_camera_summary.csv", camera_rows)
-    write_csv(output_dir / "overall_summary.csv", [overall])
+    _write_outputs(output_dir, records, all_predictions, run_rows, camera_rows, overall)
 
     print(
         f"overall: micro={overall['micro_accuracy']} macro={overall['macro_accuracy']} "
