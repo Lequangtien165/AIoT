@@ -38,9 +38,10 @@ class _FakeFaceAnalysis:
             for name, provider in _MODEL_PROVIDERS.items()
         }
 
-    def prepare(self, ctx_id, det_size):
+    def prepare(self, ctx_id, det_size, det_thresh=0.5):
         self.ctx_id = ctx_id
         self.det_size = det_size
+        self.det_thresh = det_thresh
 
 
 class FaceEngineInitTests(unittest.TestCase):

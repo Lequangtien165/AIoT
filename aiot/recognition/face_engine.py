@@ -44,13 +44,29 @@ class ProviderStatus:
 class FaceEngine:
     """Detect faces and generate embeddings with InsightFace."""
 
+    EMPTY_IMAGE_MESSAGE = "Image frame is empty."
+
+    ALIGN_TEMPLATE = np.array(
+        [
+            [38.2946, 51.6963],
+            [73.5318, 51.5014],
+            [56.0252, 71.7366],
+            [41.5493, 92.3655],
+            [70.7299, 92.2041],
+        ],
+        dtype="float32",
+    )
+
     def __init__(
         self,
         det_size: int = 640,
+        det_thresh: float = 0.5,
         runtime: RecognitionRuntime | None = None,
     ) -> None:
         if det_size <= 0:
             raise ValueError("Detection size must be greater than 0.")
+        if not 0 <= det_thresh <= 1:
+            raise ValueError("Detection threshold must be between 0 and 1.")
 
         runtime = runtime or get_recognition_runtime()
 
@@ -89,6 +105,7 @@ class FaceEngine:
             self.app.prepare(
                 ctx_id=0 if runtime.accelerator_provider in available_providers else -1,
                 det_size=(det_size, det_size),
+                det_thresh=det_thresh,
             )
 
         self.startup_output = "\n".join(
@@ -165,7 +182,7 @@ class FaceEngine:
     def detect_faces(self, image: np.ndarray) -> list[FaceDetection]:
         """Run only SCRFD detection and return frame-local alignment landmarks."""
         if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
         height, width = image.shape[:2]
         bboxes, landmarks = self.detector.detect(image, max_num=0, metric="default")
         detections: list[FaceDetection] = []
@@ -187,7 +204,7 @@ class FaceEngine:
     def embed_detected_face(self, image: np.ndarray, detection: FaceDetection) -> FaceEmbedding | None:
         """Align and embed one SCRFD detection with the buffalo_l ArcFace model."""
         if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
         if detection.landmarks is None or detection.landmarks.shape != (5, 2):
             return None
         face = Face(
@@ -200,6 +217,38 @@ class FaceEngine:
         if norm == 0 or not np.isfinite(norm):
             return None
         return FaceEmbedding(detection.bbox, (embedding / norm).astype("float32"))
+
+    def embed_aligned_image(self, image: np.ndarray, fill: float = 0.9) -> FaceEmbedding | None:
+        """Embed a pre-aligned face crop using the standard five-point template.
+
+        Surveillance datasets such as ChokePoint ship tight face crops that
+        SCRFD detects only at very low confidence, which makes landmark-based
+        alignment unreliable. This path treats the crop as roughly centered
+        and aligned and synthesizes landmarks from the norm_crop template.
+        """
+        if image is None or image.size == 0:
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
+        if not 0 < fill <= 1:
+            raise ValueError("Alignment fill must be in (0, 1].")
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        height, width = image.shape[:2]
+        scale = (min(height, width) * fill) / 112.0
+        offset = np.array(
+            [(width - 112.0 * scale) / 2.0, (height - 112.0 * scale) / 2.0],
+            dtype="float32",
+        )
+        keypoints = self.ALIGN_TEMPLATE * scale + offset
+        face = Face(
+            bbox=np.array([0, 0, width, height], dtype="float32"),
+            kps=keypoints,
+            det_score=1.0,
+        )
+        embedding = np.asarray(self.recognition_model.get(image, face), dtype="float32").flatten()
+        norm = np.linalg.norm(embedding)
+        if norm == 0 or not np.isfinite(norm):
+            return None
+        return FaceEmbedding((0, 0, width, height), (embedding / norm).astype("float32"))
 
     @staticmethod
     def _face_area(bbox: np.ndarray) -> float:
