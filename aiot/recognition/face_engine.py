@@ -44,6 +44,8 @@ class ProviderStatus:
 class FaceEngine:
     """Detect faces and generate embeddings with InsightFace."""
 
+    EMPTY_IMAGE_MESSAGE = "Image frame is empty."
+
     ALIGN_TEMPLATE = np.array(
         [
             [38.2946, 51.6963],
@@ -180,7 +182,7 @@ class FaceEngine:
     def detect_faces(self, image: np.ndarray) -> list[FaceDetection]:
         """Run only SCRFD detection and return frame-local alignment landmarks."""
         if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
         height, width = image.shape[:2]
         bboxes, landmarks = self.detector.detect(image, max_num=0, metric="default")
         detections: list[FaceDetection] = []
@@ -202,7 +204,7 @@ class FaceEngine:
     def embed_detected_face(self, image: np.ndarray, detection: FaceDetection) -> FaceEmbedding | None:
         """Align and embed one SCRFD detection with the buffalo_l ArcFace model."""
         if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
         if detection.landmarks is None or detection.landmarks.shape != (5, 2):
             return None
         face = Face(
@@ -225,7 +227,7 @@ class FaceEngine:
         and aligned and synthesizes landmarks from the norm_crop template.
         """
         if image is None or image.size == 0:
-            raise ValueError("Image frame is empty.")
+            raise ValueError(self.EMPTY_IMAGE_MESSAGE)
         if not 0 < fill <= 1:
             raise ValueError("Alignment fill must be in (0, 1].")
         if image.ndim == 2:
