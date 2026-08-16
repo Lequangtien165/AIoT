@@ -140,86 +140,97 @@ def fingerprint_id(fingerprint: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def build_cache(
-    cache_dir: Path,
-    sequences: Sequence[ChokepointSequence],
+def _read_error_entry(key: str, image_path: Path, size: int, mtime: float) -> ProbeCacheEntry:
+    return ProbeCacheEntry(
+        key=key,
+        path=str(image_path),
+        size=size,
+        mtime=mtime,
+        status="read_error",
+        detection_latency_ms=None,
+        detections=(),
+        embedding_indices=(),
+        embedding_latency_ms=(),
+    )
+
+
+def _embed_detections(
+    image: np.ndarray,
+    detections: list,
     engine: FaceEngine,
-    fingerprint: dict,
-) -> LoadedCache:
-    """Run one inference pass over every unique frame and persist the result."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    total = sum(len(sequence.frames) for sequence in sequences)
-    entries: dict[str, ProbeCacheEntry] = {}
-    vectors: list[np.ndarray] = []
-    started = time.monotonic()
-    processed = 0
-    for sequence in sequences:
-        for number in sorted(sequence.frames):
-            processed += 1
-            if processed % PROGRESS_EVERY == 0:
-                elapsed = time.monotonic() - started
-                print(
-                    f"  probe cache: {processed}/{total} frames "
-                    f"({elapsed:.0f}s, {processed / elapsed:.0f} frames/s)"
-                )
-            frame = sequence.frames[number]
-            key = frame_key(sequence, number)
-            size, mtime = _frame_fingerprint(frame.image_path)
-            image = cv2.imread(str(frame.image_path))
-            if image is None:
-                entries[key] = ProbeCacheEntry(
-                    key=key,
-                    path=str(frame.image_path),
-                    size=size,
-                    mtime=mtime,
-                    status="read_error",
-                    detection_latency_ms=None,
-                    detections=(),
-                    embedding_indices=(),
-                    embedding_latency_ms=(),
-                )
-                continue
-            detect_started = time.monotonic()
-            detections = engine.detect_faces(image)
-            detection_latency_ms = (time.monotonic() - detect_started) * 1000.0
-            cached_detections: list[CachedDetection] = []
-            embedding_indices: list[int | None] = []
-            embedding_latencies: list[float | None] = []
-            for detection in detections:
-                cached_detections.append(
-                    CachedDetection(
-                        bbox=detection.bbox,
-                        confidence=detection.confidence,
-                        landmarks=(
-                            detection.landmarks.tolist()
-                            if detection.landmarks is not None
-                            else None
-                        ),
-                    )
-                )
-                embed_started = time.monotonic()
-                face = engine.embed_detected_face(image, detection)
-                embedding_latencies.append((time.monotonic() - embed_started) * 1000.0)
-                if face is None:
-                    embedding_indices.append(None)
-                else:
-                    embedding_indices.append(len(vectors))
-                    vectors.append(face.embedding)
-            entries[key] = ProbeCacheEntry(
-                key=key,
-                path=str(frame.image_path),
-                size=size,
-                mtime=mtime,
-                status="ok",
-                detection_latency_ms=detection_latency_ms,
-                detections=tuple(cached_detections),
-                embedding_indices=tuple(embedding_indices),
-                embedding_latency_ms=tuple(embedding_latencies),
+    vectors: list[np.ndarray],
+) -> tuple[list[CachedDetection], list[int | None], list[float | None]]:
+    """Embed every detection, appending new vectors and tracking indices."""
+    cached_detections: list[CachedDetection] = []
+    embedding_indices: list[int | None] = []
+    embedding_latencies: list[float | None] = []
+    for detection in detections:
+        cached_detections.append(
+            CachedDetection(
+                bbox=detection.bbox,
+                confidence=detection.confidence,
+                landmarks=(
+                    detection.landmarks.tolist()
+                    if detection.landmarks is not None
+                    else None
+                ),
             )
-    build_seconds = round(time.monotonic() - started, 2)
-    if vectors:
-        np.save(cache_dir / EMBEDDINGS_NAME, np.vstack(vectors).astype("float32"))
-    manifest = [
+        )
+        embed_started = time.monotonic()
+        face = engine.embed_detected_face(image, detection)
+        embedding_latencies.append((time.monotonic() - embed_started) * 1000.0)
+        if face is None:
+            embedding_indices.append(None)
+        else:
+            embedding_indices.append(len(vectors))
+            vectors.append(face.embedding)
+    return cached_detections, embedding_indices, embedding_latencies
+
+
+def _infer_frame(
+    sequence: ChokepointSequence,
+    number: int,
+    engine: FaceEngine,
+    vectors: list[np.ndarray],
+) -> ProbeCacheEntry:
+    """Detect and embed one frame, returning its raw cached inference."""
+    frame = sequence.frames[number]
+    key = frame_key(sequence, number)
+    size, mtime = _frame_fingerprint(frame.image_path)
+    image = cv2.imread(str(frame.image_path))
+    if image is None:
+        return _read_error_entry(key, frame.image_path, size, mtime)
+    detect_started = time.monotonic()
+    detections = engine.detect_faces(image)
+    detection_latency_ms = (time.monotonic() - detect_started) * 1000.0
+    cached_detections, embedding_indices, embedding_latencies = _embed_detections(
+        image, detections, engine, vectors
+    )
+    return ProbeCacheEntry(
+        key=key,
+        path=str(frame.image_path),
+        size=size,
+        mtime=mtime,
+        status="ok",
+        detection_latency_ms=detection_latency_ms,
+        detections=tuple(cached_detections),
+        embedding_indices=tuple(embedding_indices),
+        embedding_latency_ms=tuple(embedding_latencies),
+    )
+
+
+def _progress_report(processed: int, total: int, started: float) -> None:
+    if processed % PROGRESS_EVERY != 0:
+        return
+    elapsed = time.monotonic() - started
+    print(
+        f"  probe cache: {processed}/{total} frames "
+        f"({elapsed:.0f}s, {processed / elapsed:.0f} frames/s)"
+    )
+
+
+def _manifest_rows(entries: dict[str, ProbeCacheEntry]) -> list[dict]:
+    return [
         {
             "key": entry.key,
             "path": entry.path,
@@ -240,9 +251,14 @@ def build_cache(
         }
         for entry in entries.values()
     ]
-    (cache_dir / MANIFEST_NAME).write_text(
-        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
-    )
+
+
+def _write_vectors(cache_dir: Path, vectors: list[np.ndarray]) -> None:
+    if vectors:
+        np.save(cache_dir / EMBEDDINGS_NAME, np.vstack(vectors).astype("float32"))
+
+
+def _write_fingerprint(cache_dir: Path, fingerprint: dict, build_seconds: float) -> dict:
     stored_fingerprint = dict(fingerprint)
     stored_fingerprint["probe_cache_id"] = fingerprint_id(fingerprint)
     stored_fingerprint["build_seconds"] = build_seconds
@@ -250,6 +266,33 @@ def build_cache(
     (cache_dir / FINGERPRINT_NAME).write_text(
         json.dumps(stored_fingerprint, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    return stored_fingerprint
+
+
+def build_cache(
+    cache_dir: Path,
+    sequences: Sequence[ChokepointSequence],
+    engine: FaceEngine,
+    fingerprint: dict,
+) -> LoadedCache:
+    """Run one inference pass over every unique frame and persist the result."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(len(sequence.frames) for sequence in sequences)
+    entries: dict[str, ProbeCacheEntry] = {}
+    vectors: list[np.ndarray] = []
+    started = time.monotonic()
+    processed = 0
+    for sequence in sequences:
+        for number in sorted(sequence.frames):
+            processed += 1
+            _progress_report(processed, total, started)
+            entries[frame_key(sequence, number)] = _infer_frame(sequence, number, engine, vectors)
+    build_seconds = round(time.monotonic() - started, 2)
+    _write_vectors(cache_dir, vectors)
+    (cache_dir / MANIFEST_NAME).write_text(
+        json.dumps(_manifest_rows(entries), ensure_ascii=False), encoding="utf-8"
+    )
+    stored_fingerprint = _write_fingerprint(cache_dir, fingerprint, build_seconds)
     vectors_array = np.vstack(vectors).astype("float32") if vectors else np.zeros((0, 512), dtype="float32")
     return LoadedCache(
         cache_dir=cache_dir,
