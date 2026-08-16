@@ -737,13 +737,13 @@ class MainOrchestrationTests(unittest.TestCase):
         run_partition.assert_not_called()
 
     def test_probe_cache_read_mode_requires_existing_cache(self):
+        args = self._args(probe_cache="read")
+        engine = mock.MagicMock()
         with mock.patch.object(
             benchmark, "load_probe_cache", side_effect=ProbeCacheNotFound("no probe cache found")
         ):
             with self.assertRaises(SystemExit) as ctx:
-                benchmark._prepare_probe_cache(
-                    self._args(probe_cache="read"), mock.MagicMock(), Path("/tmp/out"), []
-                )
+                benchmark._prepare_probe_cache(args, engine, Path("/tmp/out"), [])
         self.assertIn("--probe-cache build", str(ctx.exception))
 
     def test_probe_cache_builds_when_missing_in_auto_mode(self):
