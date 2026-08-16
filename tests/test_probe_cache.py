@@ -114,11 +114,11 @@ class ProbeCacheTests(unittest.TestCase):
         with self.assertRaises(ProbeCacheStale):
             load_cache(self.tmp / "probe_cache", stale)
 
-    def test_fingerprint_id_changes_with_det_size(self):
-        engine = _engine()
-        base = build_fingerprint(engine, 640, 0.5, 0.9)
-        smaller = build_fingerprint(engine, 320, 0.5, 0.9)
-        self.assertEqual(fingerprint_id(base), fingerprint_id(base))
+    def test_fingerprint_id_is_deterministic_for_equivalent_config(self):
+        base = build_fingerprint(_engine(), 640, 0.5, 0.9)
+        equivalent = build_fingerprint(_engine(), 640, 0.5, 0.9)
+        self.assertEqual(fingerprint_id(base), fingerprint_id(equivalent))
+        smaller = build_fingerprint(_engine(), 320, 0.5, 0.9)
         self.assertNotEqual(fingerprint_id(base), fingerprint_id(smaller))
 
     def test_get_unknown_key_returns_none(self):
@@ -142,6 +142,34 @@ class ProbeCacheTests(unittest.TestCase):
         self.assertEqual(bad.embedding_indices, ())
         loaded = load_cache(self.tmp / "probe_cache", fingerprint)
         self.assertEqual(loaded.get(frame_key(self.sequence, 1)).status, "read_error")
+
+    def test_mixed_embedding_success_and_failure_keep_vector_indices(self):
+        engine = _engine()
+        detections = [
+            FaceDetection((0, 0, 100, 100), 0.95, None),
+            FaceDetection((120, 0, 200, 100), 0.8, None),
+            FaceDetection((0, 120, 100, 200), 0.7, None),
+        ]
+        engine.detect_faces.return_value = detections
+        engine.embed_detected_face.side_effect = [
+            SimpleNamespace(embedding=EMBEDDING),
+            None,
+            SimpleNamespace(embedding=EMBEDDING),
+        ]
+        single = _sequence("P1L", "S1", "C1", self.frames[:1])
+        fingerprint = build_fingerprint(engine, 640, 0.5, 0.9)
+        with mock.patch("aiot.recognition.probe_cache.cv2.imread", return_value=FRAME_IMAGE):
+            cache = build_cache(self.tmp / "probe_cache", [single], engine, fingerprint)
+        entry = cache.get(frame_key(single, 0))
+        self.assertEqual(entry.embedding_indices, (0, None, 1))
+        self.assertEqual(len(entry.embedding_latency_ms), 3)
+        self.assertEqual(len(entry.detections), 3)
+        self.assertEqual(len(cache.vectors), 2)
+        self.assertEqual(cache.vectors.shape, (2, len(EMBEDDING)))
+        loaded = load_cache(self.tmp / "probe_cache", fingerprint)
+        self.assertEqual(loaded.get(frame_key(single, 0)).embedding_indices, (0, None, 1))
+        self.assertEqual(loaded.probe_cache_id, cache.probe_cache_id)
+        self.assertTrue(np.allclose(loaded.vectors, cache.vectors))
 
 
 if __name__ == "__main__":
