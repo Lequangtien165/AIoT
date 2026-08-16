@@ -25,4 +25,11 @@ config/mosquitto/passwords
 AGENTS.md
 .ignore
 outputs/
+chokepoint/
+benchmark-output/*
+!benchmark-output/CONTEXT.md
+!benchmark-output/SUMMARY.md
+!benchmark-output/overall_summary.csv
+!benchmark-output/run_summary.csv
+!benchmark-output/session_camera_summary.csv
 .DS_Store
