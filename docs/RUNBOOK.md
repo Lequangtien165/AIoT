@@ -57,8 +57,10 @@ docker compose ps        # expect aiot-mosquitto Up, 127.0.0.1:1883->1883
 ```
 
 Local plaintext broker binds `127.0.0.1:1883` only; LAN clients must use the TLS
-profile on `8883` (see README "MQTT Over LAN With TLS"). Demo credentials are
-generated from `config/mosquitto/passwords.example` by compose.
+profile on `8883` (see README "MQTT Over LAN With TLS"). The TLS profile
+requires a separate ignored `config/mosquitto/passwords` file with unique
+Mosquitto password hashes and binds to localhost unless `AIOT_MQTT_BIND_HOST`
+is set to the broker's LAN IP.
 
 ## 2b. Full Pipeline Over the LAN With TLS
 
@@ -88,7 +90,7 @@ the TLS broker and open inbound TCP `8883` on the Private-network firewall:
 
 ```powershell
 docker compose --profile tls up -d mosquitto-tls
-docker compose --profile tls ps   # aiot-mosquitto-tls Up, 0.0.0.0:8883->8883
+docker compose --profile tls ps   # aiot-mosquitto-tls Up, 127.0.0.1:8883->8883 by default
 ```
 
 ### 2b.2 Copy the CA to each edge client
@@ -251,10 +253,10 @@ python scripts\run_mqtt_logger.py `
 ```
 
 ```powershell
-# Dashboard, reachable on the LAN at http://<LAPTOP_LAN_IP>:8080
+# Dashboard stays on loopback; use an SSH tunnel for remote access.
 $env:AIOT_MQTT_PASSWORD='<dashboard-password>'
 python scripts\run_dashboard.py `
-  --host 0.0.0.0 --port 8080 `
+  --host 127.0.0.1 --port 8080 `
   --video-url http://<MEDIAMTX_HOST>:8889 `
   --video-device-id pi4-edge-01 `
   --mqtt-host <BROKER_LAN_IP> --mqtt-port 8883 `
@@ -264,8 +266,9 @@ python scripts\run_dashboard.py `
   --snapshot-dir .\snapshots
 ```
 
-`--host 0.0.0.0` exposes the guarded console on the LAN; pair that with the TLS
-broker profile and only bind it on a trusted network. Pass `--video-url` the
+The dashboard has no application authentication; keep it bound to loopback.
+From a remote client, use `ssh -L 8080:127.0.0.1:8080 <USER>@<LAPTOP_LAN_IP>`
+and open `http://127.0.0.1:8080`. Pass `--video-url` the
 MediaMTX WHEP endpoint that hosts the live stream (`http://<PI_IP>:8889` at the
 edge, or `<INTERNAL_MTX_HOST>:8889` if MediaMTX runs on the cloud).
 
@@ -399,9 +402,9 @@ produce command entries with `result=succeeded` and the resulting state.
   MediaMTX runs elsewhere (e.g. the Pi).
 - Snapshot images in the event drawer require `--snapshot-dir` pointing at the
   directory `recognize_stream.py --snapshot-dir` writes to.
-- The dashboard binds `127.0.0.1` by default; on the LAN use
-  `--host 0.0.0.0` together with the TLS broker profile and trusted-network
-  controls only.
+- The dashboard has no application authentication; keep it bound to
+  `127.0.0.1`. For remote access, use an SSH tunnel:
+  `ssh -L 8080:127.0.0.1:8080 <USER>@<LAPTOP_LAN_IP>`.
 
 ## 8. Cloud Consumer (Role: Cloud Consumer)
 

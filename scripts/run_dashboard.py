@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import argparse
+import ipaddress
 import sys
 
 
@@ -14,7 +15,11 @@ from aiot.mqtt.client import password_from_env
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the AIoT admin dashboard.")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1).")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Loopback bind address only; use an SSH tunnel for remote access.",
+    )
     parser.add_argument("--port", type=int, default=8080, help="Dashboard HTTP port (default: 8080).")
     parser.add_argument(
         "--video-url",
@@ -46,9 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args() -> argparse.Namespace:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     if not 0 < args.port < 65536:
         parser.error("--port must be between 1 and 65535.")
+    try:
+        is_loopback = ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        is_loopback = args.host.lower() == "localhost"
+    if not is_loopback:
+        parser.error("the dashboard has no authentication; --host must be loopback.")
     if args.mqtt_username:
         try:
             password_from_env(args.mqtt_username, args.mqtt_password_env)

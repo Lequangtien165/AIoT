@@ -10,6 +10,7 @@
 tools/
 archive/
 data_raw/
+dataset/
 dataset/IDOC_manifest.csv
 __pycache__/
 *.py[cod]

@@ -457,12 +457,20 @@ Choose a stable LAN IP or hostname for the cloud laptop. A DHCP reservation is r
 ```bash
 MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -keyout config/mosquitto/certs/server.key -out config/mosquitto/certs/server.crt -days 365 -subj "/CN=BROKER_HOSTNAME" -addext "subjectAltName=DNS:BROKER_HOSTNAME,IP:BROKER_LAN_IP"
 cp config/mosquitto/certs/server.crt config/mosquitto/certs/ca.crt
+mosquitto_passwd -c config/mosquitto/passwords aiot-edge
+mosquitto_passwd config/mosquitto/passwords aiot-recognition
+mosquitto_passwd config/mosquitto/passwords aiot-controller
+mosquitto_passwd config/mosquitto/passwords aiot-logger
+mosquitto_passwd config/mosquitto/passwords aiot-dashboard
+export AIOT_MQTT_BIND_HOST=192.168.1.20 # replace with the broker's LAN IP
 docker compose --profile tls up -d mosquitto-tls
 ```
 
+The TLS profile requires the ignored `config/mosquitto/passwords` file created above; it never falls back to the published demo passwords. The password file must contain Mosquitto hashes. TLS port `8883` binds to `127.0.0.1` by default; set `AIOT_MQTT_BIND_HOST` to the broker's LAN IP only after creating unique passwords and certificates. Do not bind to `0.0.0.0` unless every interface is intentionally trusted.
+
 The certificate SAN must match the address used by the client. For example, if the Pi connects to `192.168.1.20`, include `IP:192.168.1.20`; if it connects to `aiot-cloud.local`, include `DNS:aiot-cloud.local`.
 
-Open inbound TCP port `8883` on the cloud laptop's Private network firewall. Do not use the published demo passwords on LAN. Certificate and private-key files are ignored by Git.
+Open inbound TCP port `8883` on the cloud laptop's Private network firewall only for the trusted LAN. Certificate, private-key, and password files are ignored by Git.
 
 Copy only `config/mosquitto/certs/ca.crt` to the Pi, for example:
 
@@ -618,7 +626,7 @@ Open `http://127.0.0.1:8080`. The page connects to MediaMTX WebRTC (`http://127.
 - Overlay: recognition boxes are drawn in the browser from realtime `recognition/result` MQTT events, so the recognition pipeline must run with `--mqtt-host` and the broker must be up.
 - Wanted persons: `config/wanted.json` lists regex `match` patterns (default: the IDOC `A#####` labels) with optional `name` and `severity`. `aiot/recognition/wanted.py` is the single source of truth shared with `recognize_stream.py --wanted-config`; a wanted match draws a red box and triggers the alarm (synthesized beeps + banner, 8 s TTL, 30 s per-person cooldown).
 - Timeline: live events via WebSocket plus history read from `database/audit_log.sqlite3` (`--audit-db` to point elsewhere); command acknowledgements are persisted by the audit logger and appear as command entries.
-- Control: buttons publish `control/stream/<device>` commands through the broker; acknowledgements appear in the timeline. The dashboard binds `127.0.0.1` by default; use `--host 0.0.0.0` only on a trusted LAN and pair it with the TLS broker profile.
+- Control: buttons publish `control/stream/<device>` commands through the broker; acknowledgements appear in the timeline. The dashboard API has no authentication; keep it on `127.0.0.1` and use an SSH tunnel for remote access.
 - Snapshots: pass `--snapshot-dir` to serve recognition snapshots at `/snapshots/*` inside the event detail drawer.
 
 ## Troubleshooting
